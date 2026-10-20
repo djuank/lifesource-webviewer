@@ -1,0 +1,2319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Life Source — Patients · Details (PCare)</title>
+<!--
+  ============================================================================
+  Life Source — Web Viewer tab: PATIENTS / DETAILS (privilegio PCare)
+  ============================================================================
+  Etapa 2 — construido a mano con el Diccionario_Campos_LifeSource.xlsx y las
+  capturas de Capturas/Tab Detail/. Los nombres de campo (data-field) fueron
+  verificados y corregidos contra el schema real de la tabla Patients
+  (460 campos) extraído vía ProofKit MCP (get_filemaker_ddl_schema) el
+  2026-10-12, ya con la conexión local ProofKit <-> LN-DEV activa — no
+  requiere OttoFMS. Pendiente: conectar loadPatient() al Data API real
+  (data_api_orchestrator) en vez de SAMPLE_PATIENT.
+
+  CÓMO ESTÁ ARMADO
+  -----------------
+  - Cada campo editable tiene data-field="Tabla::Campo" (tomado tal cual del
+    diccionario). Eso es el "contrato" que va a usar la capa de datos real.
+  - loadPatient(record) recibe un objeto { "Tabla::Campo": valor, ... } y
+    rellena el formulario completo. Ahora mismo se llama con SAMPLE_PATIENT
+    (los datos de "Maria Test" que aparecen en las capturas), solo para
+    poder revisar visualmente que la maqueta calza con FileMaker.
+  - Los botones (Orders, New Visit, CPO, CCM, Status Change...) son stubs:
+    llaman a onAction(name) que por ahora solo hace console.log. Ahí es
+    donde después se conecta el script de FileMaker correspondiente.
+  - Las listas de valores (dropdowns) están con las opciones vistas en las
+    capturas + la opción actual del paciente de muestra. Faltan completarse
+    con las value lists reales del archivo (eso lo iba a resolver el
+    typegen de ProofKit; mientras no haya acceso a Otto, hay que revisarlas
+    a mano en FileMaker si se necesitan exactas).
+  - Los banners condicionales (Allergy Alert, aviso UHC, Telehealth Patient)
+    replican las condiciones "Hide object when" documentadas en el
+    diccionario, traducidas a JS en computeBanners().
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ==========================================================================
+     DEMO v2 — misma estructura/tabs/campos que Detail.html (cero cambios de
+     layout para no traumatizar al usuario), solo una piel visual nueva:
+     paleta clínica calmada + IBM Plex Sans (UI/texto editable) + IBM Plex Mono
+     (solo para valores calculados/de solo lectura — RSCM, Last Visit, fechas
+     calc — así la tipografía misma distingue "editable" de "calculado").
+     Los 5 colores de las bandas de ALERT INFO conservan su significado real
+     (mismo color = misma condición "Hide object when" del layout de FM).
+     ========================================================================== */
+  :root {
+    --ink: #1b2430;
+    --ink-soft: #5b6b78;
+    --ink-faint: #93a1ac;
+    --bg-page: #eef1f4;
+    --surface: #ffffff;
+    --border: #dde3e8;
+    --border-soft: #e9edf0;
+    --border-strong: #c3ccd3;
+
+    --primary: #2f6690;
+    --primary-dark: #204b6b;
+    --primary-soft: #e8f1f6;
+
+    --accent: #2f8f6f;
+    --accent-dark: #205c47;
+    --accent-soft: #e6f3ee;
+
+    --danger: #b3382c;
+    --danger-soft: #fbeceb;
+    --amber: #c17f1f;
+
+    --alert-code-bar: #dcae2e;   --alert-code-bg: #fdf6e1;
+    --alert-allergy-bar: #b3382c; --alert-allergy-bg: #fbeceb;
+    --alert-guardian-bar: #d98a2b; --alert-guardian-bg: #fdf1e1;
+    --alert-uhc-bar: #7c5fc4;    --alert-uhc-bg: #f1edfa;
+    --alert-tele-bar: #2f6690;   --alert-tele-bg: #eaf2f8;
+
+    --radius-panel: 10px;
+    --radius-ctrl: 6px;
+    --radius-pill: 999px;
+    --shadow-pop: 0 16px 40px rgba(27,36,48,.18);
+
+    --font-sans: "IBM Plex Sans", -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+
+    /* nombres viejos conservados como alias, por si algún selector suelto los usa */
+    --blue-dark: var(--primary-dark);
+    --blue-mid: var(--primary);
+    --red: var(--danger);
+    --green: var(--accent-dark);
+    --header-bg: var(--bg-page);
+    --gray-locked: var(--bg-page);
+    --radius: var(--radius-ctrl);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--bg-page);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  /* NOTA (actualizada 2026-10-19, revierte la decisión del 2026-10-13):
+  los tabs de nivel superior (Details|Visits|Others|Tele|Problem List|Meds|
+  Allergies|Labs|Imaging|Referrals|Care Team|Preventive|Vitals|Hosp.|Notes|
+  Triage|Consent|Email|Admin) quedan DENTRO del HTML, como un menú vertical
+  a la mano izquierda (acordado en el meeting interno del 14-oct), en vez de
+  tabs nativos de FileMaker (Tab Control) alrededor del Web Viewer. Motivo:
+  un control nativo de FM fuera del Web Viewer hace que la ventana "salte"/
+  parpadee al cambiar de tab (lo que señaló René en el meeting). Al cambiar
+  de tab se carga el HTML correspondiente a ese módulo, con su data, DENTRO
+  del mismo Web Viewer — sin cambiar de layout/objeto nativo.
+  Por ahora solo "Details" tiene contenido real (este mismo HTML armado en
+  Etapa 2); el resto de los tabs muestra un placeholder "Under Development"
+  (ver #page-placeholder / switchTab() al final del <script>). Cuando se
+  construya el HTML de un tab nuevo, el punto de enganche es switchTab():
+  ahí se reemplaza el placeholder por la carga real de ese tab (vía fetch
+  de su HTML propio, o vía un "puente" de FileMaker como fmReceiveRecord).
+  La barra superior (logo/Search/Sort/List/New Chart/pager) sigue sin estar
+  acá: búsqueda/creación/navegación de registros se mantienen nativas de
+  FileMaker, fuera del Web Viewer (eso no cambió). */
+
+  /* ---------- app shell: tira de tabs arriba + contenido ----------
+     NOTA (2026-10-19, ajuste sobre el cambio de hoy): estos tabs de módulo
+     (Details|Visits|Others|...) van horizontales ARRIBA, no en una columna
+     a la izquierda — la columna izquierda queda reservada para el futuro
+     menú de navegación general (ir a Home/otras tablas, lo que se discutió
+     en el meeting del 14-oct). Siguen viviendo DENTRO del HTML (no como Tab
+     Control nativo de FM) para evitar el parpadeo al cambiar de tab; eso no
+     cambió, solo la posición. */
+  .app-shell { flex-direction: column; min-height: 100vh; background: var(--bg-page); }
+  .screen.active.app-shell { display: flex; }
+  .side-tabs {
+    flex: none; display: flex; flex-direction: row; flex-wrap: wrap;
+    background: var(--primary-dark); padding: 8px 12px; gap: 4px;
+    overflow-x: auto;
+  }
+  .side-tab {
+    all: unset; box-sizing: border-box; display: block;
+    padding: 7px 14px; font-family: var(--font-sans); font-size: 12.5px; font-weight: 500;
+    color: rgba(255,255,255,.72); border-radius: var(--radius-ctrl); cursor: pointer;
+    white-space: nowrap; transition: background .15s, color .15s;
+  }
+  .side-tab:hover { background: rgba(255,255,255,.08); color: #fff; }
+  .side-tab.active { background: var(--surface); color: var(--primary-dark); font-weight: 600; }
+  .app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .tab-page { display: none; }
+  .tab-page.active { display: block; }
+
+  /* ---------- placeholder "Under Development" para tabs sin construir ---------- */
+  .dev-placeholder {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; padding: 80px 24px; text-align: center; color: var(--ink-soft);
+  }
+  .dev-placeholder svg { width: 40px; height: 40px; color: var(--ink-faint); }
+  .dev-placeholder h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--ink); }
+  .dev-placeholder p { margin: 0; font-size: 12.5px; color: var(--ink-soft); max-width: 320px; }
+
+  /* ==========================================================================
+     Pantalla "Patients" (listado) — pantalla de entrada antes de Detail.
+     Arquitectura (2026-10-19): el HTML pasa a saber en qué registro está, no
+     FileMaker. El botón "Patients" del menú (hecho en FM por ahora) sólo
+     navega al layout html_Patients; desde ahí todo lo maneja este HTML:
+     - Al entrar, pide el listado (requestPatientList()) — en producción esto
+       dispara un script de FileMaker (WebViewer_ListPatients) que hace un
+       Data API "read" con query/sort/limit/offset sobre un layout API_Patients_List
+       liviano (NO el de 98+ campos de Detail) y lo manda de vuelta vía
+       window.fmReceivePatientList(json). Dado que en producción hay 100k+
+       pacientes, el filtro/búsqueda/paginación son del lado de FileMaker
+       (vía la query del Data API), no en el browser — acá en la demo se
+       simulan client-side sobre MOCK_PATIENTS solo para poder probar la UI
+       sin FileMaker detrás.
+     - Al apretar "Ver" en una fila, selectPatient(recordId) cambia a la
+       pantalla Detail y dispara WebViewer_LoadPatient (recordId) → Data API
+       read sobre API_Patients_Detail → fmReceiveRecord(), igual que ya
+       funciona hoy. Ya NO hace falta $$CurrentPatientID ni Get(RecordID):
+       el recordId siempre viene del click en la lista.
+     ========================================================================== */
+  .screen { display: none; }
+  .screen.active { display: block; }
+
+  .list-screen { height: 100vh; background: var(--bg-page); flex-direction: column; }
+  .screen.active.list-screen { display: flex; }
+  .list-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .list-topbar h1 { margin: 0; font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -.2px; }
+  .list-toolbar {
+    display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex-wrap: wrap;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .list-search {
+    flex: 1; min-width: 200px; max-width: 320px; position: relative;
+  }
+  .list-search input {
+    width: 100%; padding: 7px 10px 7px 30px; border: 1px solid var(--border); border-radius: var(--radius-ctrl);
+    font-size: 12.5px; font-family: inherit; background: var(--bg-page); color: var(--ink);
+  }
+  .list-search input:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); background: var(--surface); }
+  .list-search svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--ink-faint); }
+  .status-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .status-pill {
+    all: unset; box-sizing: border-box; padding: 6px 13px; font-size: 12px; font-weight: 600;
+    border-radius: var(--radius-pill); border: 1px solid var(--border); color: var(--ink-soft);
+    cursor: pointer; font-family: inherit; transition: background .15s, color .15s, border-color .15s;
+  }
+  .status-pill:hover { background: var(--bg-page); }
+  .status-pill.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .list-toolbar select {
+    padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-ctrl);
+    font-size: 12.5px; font-family: inherit; background: var(--surface); color: var(--ink); margin-left: auto;
+  }
+
+  .list-table-wrap { flex: 1; min-height: 0; overflow: auto; padding: 0 20px 20px; }
+  table.patients-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); margin-top: 14px; }
+  table.patients-table th {
+    position: sticky; top: 0; z-index: 1;
+    text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: .3px; text-transform: uppercase;
+    color: var(--ink-faint); padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-page);
+  }
+  table.patients-table td { padding: 11px 14px; border-bottom: 1px solid var(--border-soft); font-size: 12.5px; color: var(--ink); vertical-align: middle; }
+  table.patients-table tbody tr:last-child td { border-bottom: none; }
+  table.patients-table tbody tr:hover { background: var(--primary-soft); }
+  .pt-name-cell { display: flex; align-items: center; gap: 10px; }
+  .pt-avatar {
+    flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--primary);
+    color: #fff; font-size: 11.5px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+  .pt-name-cell .name { font-weight: 600; color: var(--ink); }
+  .pt-name-cell .sub { font-size: 11px; color: var(--ink-soft); }
+  .status-badge { display: inline-flex; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: var(--radius-pill); }
+  .status-badge.Active { background: var(--accent-soft); color: var(--accent-dark); }
+  .status-badge.Pending { background: #fdf1e1; color: #a35c13; }
+  .status-badge.Inactive { background: var(--bg-page); color: var(--ink-faint); }
+  .status-badge.Discharged { background: var(--danger-soft); color: var(--danger); }
+  .pt-view-btn {
+    all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 11px; font-size: 11.5px; font-weight: 600; color: var(--primary-dark); background: var(--primary-soft);
+    border-radius: var(--radius-ctrl); cursor: pointer; font-family: inherit; transition: background .15s, color .15s;
+  }
+  .pt-view-btn:hover { background: var(--primary-dark); color: #fff; }
+  .pt-view-btn svg { width: 13px; height: 13px; }
+
+  .list-pagination {
+    display: flex; align-items: center; justify-content: space-between; padding: 12px 20px 18px;
+    font-size: 12px; color: var(--ink-soft);
+  }
+  .list-pagination .pg-btns { display: flex; gap: 6px; }
+  .list-pagination button {
+    all: unset; box-sizing: border-box; padding: 6px 12px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); border-radius: var(--radius-ctrl); color: var(--ink-soft); cursor: pointer;
+    font-family: inherit; transition: background .15s, color .15s;
+  }
+  .list-pagination button:hover:not(:disabled) { background: var(--bg-page); color: var(--ink); }
+  .list-pagination button:disabled { opacity: .4; cursor: default; }
+
+  /* botón "Patients" (volver al listado) dentro de la tira de tabs de Detail */
+  .side-tab.back-to-list {
+    background: rgba(255,255,255,.08); display: flex; align-items: center; gap: 5px;
+    border-right: 1px solid rgba(255,255,255,.18); margin-right: 6px; padding-right: 16px;
+  }
+  .side-tab.back-to-list svg { width: 13px; height: 13px; }
+
+  /* ---------- patient banner ---------- */
+  .patient-banner {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .badge-row { display: flex; gap: 6px; }
+  .badge {
+    font-weight: 600; font-size: 11px;
+    border-radius: var(--radius-pill); padding: 4px 10px;
+    border: 1px solid transparent;
+  }
+  .badge.on { background: var(--danger-soft); color: var(--danger); border-color: rgba(179,56,44,.25); }
+  .badge.off { background: var(--bg-page); color: var(--ink-faint); border-color: var(--border); }
+  .patient-name { margin-left: auto; font-size: 19px; font-weight: 600; color: var(--ink); letter-spacing: -.2px; }
+
+  /* ---------- layout grid ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 290px 1fr 420px;
+    gap: 14px;
+    padding: 16px;
+    align-items: stretch; /* las 3 columnas igualan la altura de la más alta —
+      antes quedaba un hueco de fondo gris debajo de los paneles más cortos */
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-panel);
+    padding: 16px;
+    box-shadow: 0 1px 2px rgba(27,36,48,.04);
+    display: flex;
+    flex-direction: column;
+  }
+  .panel h2 {
+    flex: none;
+    font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--ink);
+    padding-bottom: 8px; border-bottom: 1px solid var(--border-soft);
+  }
+  /* el panel de Patient Information no tiene subtabs: su único hijo "elástico"
+     es el box de alertas, que se ancla al fondo cuando el panel queda más
+     alto que su contenido (en vez de dejar un vacío debajo del último campo) */
+  .panel > .alert-info { margin-top: auto; }
+  /* paneles CON subtabs (Main/Specialty Services, TH/Psych/PC/...): el
+     subpanel activo crece para ocupar toda la altura disponible del panel */
+  .subtabs { flex: none; }
+  .subpanel.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+  .field { margin-bottom: 10px; }
+  .field label {
+    display: block; font-size: 11px; color: var(--ink-soft); font-weight: 500; margin-bottom: 3px;
+  }
+  .field input[type=text], .field input[type=date], .field input[type=number],
+  .field select, .field textarea {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-ctrl);
+    font-size: 12.5px; font-family: inherit; background: var(--surface); color: var(--ink);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible {
+    outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft);
+  }
+  .field textarea { resize: vertical; min-height: 54px; }
+
+  /* ==========================================================================
+     Guardado con botón (2026-10-19, reemplaza el auto-save por campo de la
+     versión anterior — pedido explícito del cliente, "profesional y moderno").
+     Editar un campo YA NO lo manda a FileMaker: solo lo marca "sucio"
+     (.field-dirty, ámbar) y hace aparecer la barra flotante #saveBar. Todos
+     los cambios pendientes se mandan juntos en UN solo WebViewer_SetField al
+     apretar "Save" (ver markDirty()/saveAllChanges() en el <script>). Mismo
+     mecanismo de confirmación real vía fmConfirmSave() que antes, solo que
+     ahora confirma/objeta el lote completo en vez de un campo suelto.
+     .field-dirty = editado, sin guardar todavía (ámbar).
+     .just-saved  = FileMaker confirmó el guardado (verde, se quita solo).
+     .save-error  = FileMaker objetó o no confirmó a tiempo (rojo, queda
+                    marcado y el cambio sigue en la barra para reintentar).
+     ========================================================================== */
+  .field-dirty, .just-saved, .save-error {
+    transition: border-color .15s, box-shadow .15s !important;
+  }
+  .field-dirty {
+    border-color: var(--amber) !important;
+    box-shadow: 0 0 0 3px rgba(193, 127, 31, .15) !important;
+  }
+  .just-saved {
+    border-color: var(--accent-dark) !important;
+    box-shadow: 0 0 0 3px var(--accent-soft) !important;
+  }
+  .save-error {
+    border-color: var(--danger) !important;
+    box-shadow: 0 0 0 3px var(--danger-soft) !important;
+  }
+  #missingItemsGrid.field-dirty, #missingItemsGrid.just-saved, #missingItemsGrid.save-error { border-radius: var(--radius-ctrl); }
+
+  /* ---------- barra flotante de guardado ---------- */
+  .save-bar {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(90px);
+    z-index: 150; display: flex; align-items: center; gap: 14px;
+    background: var(--primary-dark); color: #fff; padding: 11px 14px 11px 18px;
+    border-radius: var(--radius-panel); box-shadow: var(--shadow-pop);
+    font-family: var(--font-sans); opacity: 0; pointer-events: none;
+    transition: transform .2s ease, opacity .2s ease;
+  }
+  .save-bar.visible { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
+  .save-bar .sb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex: none; }
+  .save-bar.sb-error .sb-dot { background: var(--danger); }
+  .save-bar .sb-text { font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+  .save-bar .sb-error-text { color: #ffd0cb; font-size: 11.5px; display: none; }
+  .save-bar.sb-error .sb-error-text { display: block; }
+  .save-bar .sb-btns { display: flex; gap: 8px; }
+  .save-bar button {
+    all: unset; box-sizing: border-box; font-family: inherit; cursor: pointer;
+    padding: 7px 14px; border-radius: var(--radius-ctrl); font-size: 12px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; transition: background .15s, opacity .15s;
+  }
+  .save-bar .sb-discard { color: rgba(255,255,255,.85); }
+  .save-bar .sb-discard:hover { background: rgba(255,255,255,.1); }
+  .save-bar .sb-save { background: var(--accent-dark); color: #fff; }
+  .save-bar .sb-save:hover { background: var(--accent); }
+  .save-bar .sb-save:disabled, .save-bar .sb-discard:disabled { opacity: .55; cursor: default; pointer-events: none; }
+  .save-bar .sb-spinner {
+    width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
+    border-top-color: #fff; animation: sb-spin .7s linear infinite; display: none;
+  }
+  .save-bar.sb-saving .sb-spinner { display: inline-block; }
+  @keyframes sb-spin { to { transform: rotate(360deg); } }
+
+  /* ---------- modal chico "¿descartar cambios?" (navegar con cambios sin guardar) ---------- */
+  .confirm-backdrop {
+    position: fixed; inset: 0; background: rgba(27,36,48,.32); z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .confirm-backdrop[hidden] { display: none; }
+  .confirm-box {
+    background: var(--surface); border-radius: var(--radius-panel); box-shadow: var(--shadow-pop);
+    width: 320px; padding: 18px;
+  }
+  .confirm-box h3 { margin: 0 0 6px; font-size: 14.5px; font-weight: 700; color: var(--ink); }
+  .confirm-box p { margin: 0 0 16px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+  .confirm-box .cb-btns { display: flex; justify-content: flex-end; gap: 8px; }
+  .confirm-box button {
+    all: unset; box-sizing: border-box; font-family: inherit; cursor: pointer;
+    padding: 7px 14px; border-radius: var(--radius-ctrl); font-size: 12px; font-weight: 600;
+  }
+  .confirm-box .cb-cancel { color: var(--ink-soft); }
+  .confirm-box .cb-cancel:hover { background: var(--bg-page); }
+  .confirm-box .cb-discard { background: var(--danger); color: #fff; }
+  .confirm-box .cb-discard:hover { background: var(--danger); opacity: .9; }
+
+  /* ---------- campo de fecha a medida: input[data-kind=date] queda en blanco
+     cuando no hay valor, con un ícono de calendario fijo a la derecha; al
+     hacer click (en el campo o en el ícono) se abre un mini-calendario propio
+     (ver #miniCal más abajo). Es HTML/CSS/JS 100% propio — no depende del
+     <input type=date> nativo del navegador, así que se ve IDÉNTICO en Mac y
+     en Windows dentro del WebViewer de FileMaker (el problema que teníamos
+     antes era justo que el control nativo se ve distinto en cada sistema). */
+  .date-wrap { position: relative; }
+  .date-wrap .date-display {
+    padding-right: 30px; cursor: pointer; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius-ctrl);
+    font-size: 12.5px; color: var(--ink); height: 28px; line-height: 26px;
+    padding-left: 8px; user-select: none;
+  }
+  .date-wrap .date-display:empty::before { content: ""; } /* sin placeholder: vacío queda visualmente en blanco */
+  .date-wrap .date-display:focus-visible {
+    outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft);
+  }
+  .date-wrap .date-trigger {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    width: 24px; height: 24px; border: none; background: transparent; padding: 0;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    color: var(--ink-faint); border-radius: 4px;
+  }
+  .date-wrap .date-trigger:hover { color: var(--primary); background: var(--primary-soft); }
+  .date-wrap .date-trigger svg { width: 15px; height: 15px; }
+
+  /* ---------- mini-calendario flotante (un solo popover compartido) ---------- */
+  #miniCal {
+    position: absolute; z-index: 200; width: 232px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius-panel); box-shadow: var(--shadow-pop);
+    padding: 10px; font-family: var(--font-sans);
+  }
+  #miniCal[hidden] { display: none; }
+  #miniCal .mc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  #miniCal .mc-head button {
+    border: none; background: transparent; color: var(--ink-soft); cursor: pointer; width: 22px; height: 22px;
+    border-radius: 4px; display: flex; align-items: center; justify-content: center;
+  }
+  #miniCal .mc-head button:hover { background: var(--bg-page); color: var(--ink); }
+  #miniCal .mc-head button svg { width: 14px; height: 14px; }
+  #miniCal .mc-title { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+  #miniCal .mc-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; }
+  #miniCal .mc-dow { font-size: 9.5px; font-weight: 600; color: var(--ink-faint); text-align: center; padding: 3px 0 5px; }
+  #miniCal .mc-day {
+    border: none; background: transparent; font-family: var(--font-mono); font-size: 11px; color: var(--ink);
+    padding: 5px 0; border-radius: 4px; cursor: pointer; text-align: center;
+  }
+  #miniCal .mc-day:hover { background: var(--primary-soft); }
+  #miniCal .mc-day.mc-other { color: var(--ink-faint); }
+  #miniCal .mc-day.mc-today { font-weight: 700; color: var(--primary-dark); }
+  #miniCal .mc-day.mc-selected { background: var(--primary); color: #fff; }
+  #miniCal .mc-foot { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-soft); }
+  #miniCal .mc-foot button {
+    border: none; background: transparent; font-size: 11px; font-weight: 600; color: var(--primary); cursor: pointer; padding: 3px 4px;
+  }
+  #miniCal .mc-foot button:hover { text-decoration: underline; }
+  .field.readonly input, .field.readonly select { background: var(--bg-page); color: var(--ink-soft); font-family: var(--font-mono); font-size: 12px; }
+  .field.note textarea { background: #fdf9ec; border-color: #ece0ba; }
+  .field small { display: inline-block; margin-top: 4px; font-size: 11px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .calcbox {
+    background: var(--bg-page); border: 1px solid var(--border); border-radius: var(--radius-ctrl);
+    padding: 6px; font-size: 12px; text-align: center; font-family: var(--font-mono); color: var(--ink-soft);
+  }
+  .calcbox.flag { background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+
+  /* ---------- alert box: barra de color a la izquierda + fondo tenue + texto en --ink.
+     Los colores por banda conservan el significado real (mismo mapeo de siempre). ---------- */
+  .alert-info { border: 1px solid var(--border); border-radius: var(--radius-panel); overflow: hidden; margin-top: 12px; }
+  .alert-info > div {
+    position: relative; padding: 9px 12px 9px 16px; font-weight: 600; font-size: 12px;
+    display: flex; justify-content: space-between; align-items: center; color: var(--ink);
+  }
+  .alert-info > div::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
+  .alert-info > div:not(:last-child) { border-bottom: 1px solid rgba(27,36,48,.06); }
+  .alert-info > div[hidden] { display: none; }
+  .alert-info[hidden-fm] { display: none; }
+
+  .alert-info .codestatus { background: var(--alert-code-bg); flex-direction: column; align-items: flex-start; gap: 2px; font-size: 11px; letter-spacing: .3px; color: var(--ink-soft); }
+  .alert-info .codestatus::before { background: var(--alert-code-bar); }
+  .alert-info .codestatus span { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--ink); letter-spacing: 0; }
+
+  .alert-info .allergy { background: var(--alert-allergy-bg); }
+  .alert-info .allergy::before { background: var(--alert-allergy-bar); }
+  .alert-info .allergy a { color: var(--primary-dark); text-decoration: underline; font-size: 11px; font-weight: 500; cursor: pointer; }
+
+  .alert-info .guardian { background: var(--alert-guardian-bg); flex-direction: column; align-items: flex-start; gap: 2px; }
+  .alert-info .guardian::before { background: var(--alert-guardian-bar); }
+  .alert-info .guardian .name { font-weight: 400; display: block; color: var(--ink-soft); font-size: 11.5px; }
+
+  .alert-info .tele { background: var(--alert-tele-bg); color: var(--primary-dark); flex-direction: column; align-items: flex-start; gap: 2px; }
+  .alert-info .tele::before { background: var(--alert-tele-bar); }
+  .alert-info .tele a { display: block; font-weight: 500; font-size: 11px; cursor: pointer; color: var(--primary); }
+
+  .alert-info .uhc { background: var(--alert-uhc-bg); color: #4a3a85; font-size: 11.5px; font-weight: 500; }
+  .alert-info .uhc::before { background: var(--alert-uhc-bar); }
+
+  /* ---------- sub tab strips (segmented pill control) ---------- */
+  .subtabs {
+    display: flex; gap: 3px; width: fit-content; margin-bottom: 12px;
+    background: var(--bg-page); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 3px;
+  }
+  .subtabs button {
+    border: none; background: transparent; padding: 6px 14px; font-size: 12px; font-weight: 600;
+    cursor: pointer; color: var(--ink-soft); border-radius: var(--radius-pill); font-family: inherit;
+    transition: background .15s, color .15s;
+  }
+  .subtabs button.active { background: var(--surface); color: var(--primary-dark); box-shadow: 0 1px 3px rgba(27,36,48,.12); }
+  .subpanel { display: none; }
+
+  .service-head {
+    background: var(--primary-soft); color: var(--primary-dark); border-left: 3px solid var(--primary);
+    border-radius: 6px; padding: 9px 10px; font-weight: 600; margin-bottom: 12px;
+  }
+  .service-head small { display: block; font-weight: 500; font-size: 11px; color: var(--primary); margin-top: 1px; }
+
+  button.action {
+    background: var(--accent-dark); color: #fff; border: none; border-radius: var(--radius-ctrl); padding: 8px 12px;
+    font-weight: 600; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 6px;
+    font-family: inherit; transition: background .15s, transform .1s;
+  }
+  button.action:hover { background: var(--accent); }
+  button.action:active { transform: translateY(1px); }
+  button.action.secondary {
+    background: transparent; color: var(--ink-soft); border: 1px solid var(--border-strong);
+  }
+  button.action.secondary:hover { background: var(--bg-page); color: var(--ink); }
+  .action-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+
+  /* ---------- RSCM: mini-gauge, el único momento visual "con peso" de la página ---------- */
+  /* margin-top:auto ancla RSCM + los botones CPO/CCM/Status Change al fondo
+     del panel (ahora de altura pareja con los otros dos) en vez de dejarlos
+     colgando justo debajo de las notas, con un vacío grande después */
+  .rscm-row { display: flex; align-items: center; gap: 12px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+  .rscm-gauge { display: flex; align-items: center; gap: 10px; }
+  .rscm-gauge-track { width: 46px; height: 46px; border-radius: 50%; background: conic-gradient(var(--border-soft) 0 100%); display: flex; align-items: center; justify-content: center; position: relative; }
+  .rscm-gauge-track::before { content: ""; position: absolute; inset: 5px; border-radius: 50%; background: var(--surface); }
+  .rscm-gauge-fill { position: absolute; inset: 0; border-radius: 50%; }
+  .rscm-box { position: relative; font-family: var(--font-mono); font-weight: 600; font-size: 14px; color: var(--ink); }
+  .rscm-meta { display: flex; flex-direction: column; gap: 1px; }
+  .rscm-caption { font-size: 10.5px; color: var(--ink-faint); font-weight: 500; }
+  .rscm-label { font-weight: 600; font-size: 12.5px; }
+
+  /* ---------- popover "Select Order" ---------- */
+  .order-popover-backdrop {
+    position: fixed; inset: 0; background: rgba(27,36,48,.32); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .order-popover-backdrop[hidden] { display: none; }
+  .order-popover {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); width: 380px; overflow: hidden;
+    box-shadow: var(--shadow-pop);
+  }
+  .order-popover-head {
+    background: var(--accent-dark); color: #fff; font-weight: 600; padding: 10px 14px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .order-popover-head button { background: transparent; border: none; color: #fff; font-size: 16px; cursor: pointer; }
+  .order-popover-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px; }
+  .order-popover-grid button {
+    background: var(--accent-soft); color: var(--accent-dark); border: 1px solid transparent; border-radius: var(--radius-ctrl); padding: 14px 8px;
+    font-weight: 600; font-size: 12.5px; cursor: pointer; display: flex; flex-direction: column;
+    align-items: center; gap: 5px; font-family: inherit; transition: background .15s, color .15s;
+  }
+  .order-popover-grid button:hover { background: var(--accent-dark); color: #fff; }
+  .order-popover-grid button span.icon { font-size: 19px; }
+
+  /* ---------- popover "Select Primary Care Visit Type" (y variantes single-col) ---------- */
+  .visit-popover { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); width: 560px; overflow: hidden; box-shadow: var(--shadow-pop); }
+  .visit-popover-head {
+    background: var(--primary-dark); color: #fff; font-weight: 600; padding: 11px 16px;
+    display: flex; justify-content: space-between; align-items: center; font-size: 14px;
+  }
+  .visit-popover-head button { background: transparent; border: none; color: #fff; font-size: 16px; cursor: pointer; }
+  .visit-popover-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px; }
+  .visit-popover-grid button {
+    background: var(--primary-soft); color: var(--primary-dark); border: 1px solid transparent; border-radius: var(--radius-ctrl); padding: 11px 12px;
+    font-weight: 600; font-size: 12.5px; cursor: pointer; display: flex; align-items: center; gap: 10px;
+    text-align: left; font-family: inherit; transition: background .15s, color .15s;
+  }
+  .visit-popover-grid button:hover { background: var(--primary-dark); color: #fff; }
+  .visit-popover-grid button .dot {
+    width: 9px; height: 9px; border-radius: 50%; flex: none;
+  }
+  .visit-popover-grid button .dot.red { background: var(--danger); }
+  .visit-popover-grid button .dot.green { background: var(--accent); }
+  .visit-popover.single-col .visit-popover-grid { grid-template-columns: 1fr; }
+  .visit-popover.single-col .visit-popover-grid button { padding: 13px 16px; font-size: 13px; }
+  .visit-popover-close {
+    margin: 0 14px 14px; background: transparent; color: var(--ink-soft); border: 1px solid var(--border-strong); border-radius: var(--radius-ctrl);
+    padding: 8px 14px; font-weight: 600; cursor: pointer; display: block; margin-left: auto; font-family: inherit;
+  }
+  .visit-popover-close:hover { background: var(--bg-page); color: var(--ink); }
+
+  .subsection-title { font-weight: 600; color: var(--ink); margin: 16px 0 8px; font-size: 12.5px; }
+  .subsection-title:first-child { margin-top: 0; }
+
+  .auth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .auth-grid .col { border: 1px solid transparent; border-radius: var(--radius-ctrl); padding: 6px; }
+
+  table.portal { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  table.portal th { background: var(--bg-page); color: var(--ink-soft); font-weight: 600; text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  table.portal td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); }
+
+  /* ---------- Bloqueo condicional (Specialty/Additional Providers) ---------- */
+  .locked-wrap { position: relative; min-height: 96px; }
+  .locked-wrap .lock-overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    background: rgba(238,241,244,.92); border: 1px dashed var(--border-strong); border-radius: var(--radius-ctrl); text-align: center; padding: 10px;
+  }
+  .locked-wrap .lock-overlay .lock-icon { color: var(--amber); font-size: 26px; line-height: 1; }
+  .locked-wrap .lock-overlay .lock-caption { font-size: 10.5px; color: var(--ink-soft); font-weight: 500; max-width: 180px; }
+  .locked-wrap.unlocked .lock-overlay { display: none; }
+
+  .checkbox-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin: 8px 0; }
+  .checkbox-grid label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; color: var(--ink-soft); }
+
+  .appt-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .appt-toolbar strong { font-size: 12.5px; color: var(--ink); font-weight: 600; }
+  .appt-toolbar .add {
+    background: var(--primary); color: #fff; border: none; border-radius: 50%; width: 26px; height: 26px;
+    cursor: pointer; font-size: 16px; line-height: 1; transition: background .15s;
+  }
+  .appt-toolbar .add:hover { background: var(--primary-dark); }
+
+  @media (max-width: 920px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- íconos: SVG en línea (idénticos en Mac y Windows; no dependen
+     de la fuente de emoji del sistema, que varía entre plataformas) ---------- */
+  svg.ic { width: 15px; height: 15px; flex: none; vertical-align: -3px; margin-right: 1px; }
+  .alert-info > div svg.ic { width: 15px; height: 15px; vertical-align: -3px; margin-right: 4px; }
+  .order-popover-grid .icon, .visit-popover-grid .icon { display: inline-flex; }
+</style>
+</head>
+<body>
+
+  <!-- bloque temporal de diagnóstico (2026-10-19) — muestra si FileMaker.PerformScript
+       está inyectado en este Web Viewer (clave para saber si el puente funciona en
+       WebDirect con contenido data: URI). Quitar una vez confirmado. -->
+  <div id="fmBridgeDebug" style="position:fixed;top:4px;right:4px;z-index:9999;font-family:monospace;font-size:10px;padding:4px 8px;border-radius:4px;background:#222;color:#fff;opacity:.85;"></div>
+
+  <!-- ============ SCREEN: Patients (listado) — pantalla de entrada ============
+       El botón "Patients" del menú de FileMaker navega al layout html_Patients;
+       esta es la primera pantalla que se ve ahí. Ver nota de arquitectura arriba
+       en el <style>. -->
+  <div class="screen active list-screen" id="screenList">
+    <div class="list-topbar">
+      <h1>Patients</h1>
+    </div>
+    <div class="list-toolbar">
+      <div class="list-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7.5"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+        <input type="text" id="patientSearchInput" placeholder="Search by name...">
+      </div>
+      <div class="status-pills" id="statusPills">
+        <button type="button" class="status-pill active" data-status="">All</button>
+        <button type="button" class="status-pill" data-status="Active">Active</button>
+        <button type="button" class="status-pill" data-status="Pending">Pending</button>
+        <button type="button" class="status-pill" data-status="Inactive">Inactive</button>
+        <button type="button" class="status-pill" data-status="Discharged">Discharged</button>
+      </div>
+      <select id="facilityFilter">
+        <option value="">All facilities</option>
+      </select>
+    </div>
+
+    <div class="list-table-wrap">
+      <table class="patients-table">
+        <thead>
+          <tr>
+            <th>Patient</th>
+            <th>Birthdate</th>
+            <th>Facility</th>
+            <th>PCare Status</th>
+            <th>Provider</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="patientsTableBody">
+          <!-- generado por renderPatientList() -->
+        </tbody>
+      </table>
+    </div>
+
+    <div class="list-pagination">
+      <span id="pgSummary">—</span>
+      <div class="pg-btns">
+        <button type="button" id="pgPrevBtn">&larr; Previous</button>
+        <button type="button" id="pgNextBtn">Next &rarr;</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN: Patient Detail ============ -->
+  <div class="screen app-shell" id="screenDetail">
+    <!-- Menú de tabs de nivel superior, DENTRO del HTML (ver nota en el <style> arriba
+         sobre por qué ya no son tabs nativos de FileMaker). Solo "Details" tiene
+         contenido real; el resto dispara el placeholder de switchTab(). -->
+    <nav class="side-tabs" id="sideTabs" aria-label="Patient record sections">
+      <button type="button" class="side-tab back-to-list" id="backToListBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 9 12 15 19"/></svg> Patients</button>
+      <button type="button" class="side-tab active" data-tab="details">Details</button>
+      <button type="button" class="side-tab" data-tab="visits">Visits</button>
+      <button type="button" class="side-tab" data-tab="others">Others</button>
+      <button type="button" class="side-tab" data-tab="tele">Tele</button>
+      <button type="button" class="side-tab" data-tab="problemlist">Problem List</button>
+      <button type="button" class="side-tab" data-tab="meds">Meds</button>
+      <button type="button" class="side-tab" data-tab="allergies">Allergies</button>
+      <button type="button" class="side-tab" data-tab="labs">Labs</button>
+      <button type="button" class="side-tab" data-tab="imaging">Imaging</button>
+      <button type="button" class="side-tab" data-tab="referrals">Referrals</button>
+      <button type="button" class="side-tab" data-tab="careteam">Care Team</button>
+      <button type="button" class="side-tab" data-tab="preventive">Preventive</button>
+      <button type="button" class="side-tab" data-tab="vitals">Vitals</button>
+      <button type="button" class="side-tab" data-tab="hosp">Hosp.</button>
+      <button type="button" class="side-tab" data-tab="notes">Notes</button>
+      <button type="button" class="side-tab" data-tab="triage">Triage</button>
+      <button type="button" class="side-tab" data-tab="consent">Consent</button>
+      <button type="button" class="side-tab" data-tab="email">Email</button>
+      <button type="button" class="side-tab" data-tab="admin">Admin</button>
+    </nav>
+
+    <div class="app-main">
+  <div class="patient-banner">
+    <div class="badge-row" id="careGapBadges">
+      <span class="badge off" data-field="CareGap_Breast" data-label="BCS">BCS</span>
+      <span class="badge off" data-field="CareGap_Depression" data-label="DP">DP</span>
+      <span class="badge off" data-field="CareGap_HTN" data-label="HTN">HTN</span>
+      <span class="badge off" data-field="CareGap_DM" data-label="DM">DM</span>
+    </div>
+    <div class="patient-name" id="patientHeader">— / — / —</div>
+  </div>
+
+  <div id="tabContentHost">
+  <div class="tab-page active" id="page-details">
+  <div class="layout">
+
+    <!-- ============ LEFT: Patient Information + Alert Info ============ -->
+    <div class="panel">
+      <h2>Patient Information</h2>
+
+      <div class="field"><label>Last Name</label><input type="text" data-field="Last_Name"></div>
+      <div class="field"><label>First Name</label><input type="text" data-field="First_Name"></div>
+      <div class="row2">
+        <div class="field"><label>NickName</label><input type="text" data-field="NickName"></div>
+        <div class="field"><label>Sfix</label>
+          <select data-field="Suffix">
+            <option value=""></option>
+            <option>Jr.</option><option>Sr.</option><option>II</option><option>III</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Birthdate</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Birthdate"></div></div>
+      <div class="field"><label>Biological Sex</label>
+        <select data-field="Gender"><option value=""></option><option>Male</option><option>Female</option></select>
+      </div>
+      <div class="field"><label>Gender Identity</label>
+        <select data-field="Gender2"><option value=""></option></select>
+      </div>
+      <div class="field"><label>Pronouns</label>
+        <select data-field="Pronouns"><option value=""></option></select>
+      </div>
+      <div class="field"><label>Room Location</label><input type="text" data-field="Room_Location"></div>
+      <div class="field"><label>Facility</label>
+        <input type="text" data-field="Facilities 2::Name" readonly>
+        <small id="facilityAbbr" style="color:var(--green);font-weight:700;"></small>
+      </div>
+      <div class="field"><label>Telehealth Svc Loc</label>
+        <select data-field="Telehealth Patient Location of Services"><option value=""></option><option>Office</option><option>Home</option></select>
+      </div>
+      <div class="field"><label>Level of Care</label>
+        <select data-field="level_of_care"><option value=""></option><option>Memory Care</option><option>Assisted Living</option><option>Independent</option><option>Skilled Nursing</option></select>
+      </div>
+      <div class="alert-info" id="alertInfoBox">
+        <div class="codestatus" id="codeStatusRow">
+          CODE STATUS<br><span data-field="Code Status">—</span>
+        </div>
+        <div class="allergy" id="allergyRow">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.6 1.9 18a1.8 1.8 0 0 0 1.6 2.7h17a1.8 1.8 0 0 0 1.6-2.7L13.7 3.6a1.8 1.8 0 0 0-3.4 0Z"/><line x1="12" y1="9.5" x2="12" y2="13.5"/><circle cx="12" cy="16.8" r="0.9" fill="currentColor" stroke="none"/></svg> Allergy Alert <a onclick="onAction('goto-allergies')">Click for Allergies</a>
+        </div>
+        <div class="guardian" id="guardianRow">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M15.5 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M2.5 20v-1.2A4.3 4.3 0 0 1 6.8 14.5h3.4A4.3 4.3 0 0 1 14.5 18.8V20"/><path d="M14.3 15a4.3 4.3 0 0 1 3.9-.5 4.3 4.3 0 0 1 3.3 4.2V20"/></svg> LEGAL GUARDIAN
+          <span class="name" data-field="Main_Contact">—</span>
+        </div>
+        <div class="uhc" id="uhcWarning" hidden>
+          ! UHC Community Plan ! Insurance does NOT cover 90837.
+        </div>
+        <div class="tele" id="telehealthBanner">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2.5" width="11" height="19" rx="2.2"/><line x1="10" y1="18.3" x2="14" y2="18.3"/></svg> TELEHEALTH PATIENT
+          <a onclick="onAction('telehealth-info')">Click to learn more</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ MIDDLE: Main Services / Specialty Services ============ -->
+    <div class="panel">
+      <div class="subtabs">
+        <button class="active" data-sub="mid" data-target="mainServices">Main Services</button>
+        <button data-sub="mid" data-target="specialtyServices">Specialty Services</button>
+      </div>
+
+      <!-- Main Services -->
+      <div class="subpanel active" id="mainServices">
+        <div class="service-head">
+          Primary Care
+          <small data-field="Patients ~ PCare_Provider::Name">—</small>
+        </div>
+        <div class="row3">
+          <div class="field"><label>Status</label>
+            <select data-field="PCare_Status"><option>Active</option><option>Inactive</option><option>Pending</option><option>Discharged</option></select>
+          </div>
+          <div class="field"><label>Place of Service</label>
+            <select data-field="Place_Service"><option>ALF</option><option>Office</option><option>Home</option><option>SNF</option></select>
+          </div>
+          <div class="field"><label>Approved Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Pcare_ApprovedDate"></div></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>CCM Status</label>
+            <select data-field="CCM_enrollment_status"><option>Ineligible</option><option>Eligible</option><option>Enrolled</option></select>
+          </div>
+          <div class="field"><label>Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="CCM_enrollment_date"></div></div>
+        </div>
+
+        <div class="action-row">
+          <button class="action" onclick="openOrdersPopover()"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 3.5h7a1 1 0 0 1 1 1V4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-.5a1 1 0 0 1 1-1Z"/><path d="M6.5 4.6H6A1.5 1.5 0 0 0 4.5 6.1v13A1.5 1.5 0 0 0 6 20.6h12a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 18 4.6h-.5"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="14.5" x2="16" y2="14.5"/><line x1="8" y1="18" x2="13" y2="18"/></svg> Orders</button>
+          <button class="action" onclick="openVisitPopover()"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.5 12 3.5l8.5 8"/><path d="M5.5 10v8.5a1 1 0 0 0 1 1H9v-5h6v5h2.5a1 1 0 0 0 1-1V10"/></svg> New Visit</button>
+        </div>
+
+        <div class="service-head" style="margin-bottom:6px;">Pcare APL Notes</div>
+        <div class="field"><textarea data-field="PCare_APL_Notes" rows="6"></textarea></div>
+
+        <div class="rscm-row">
+          <div class="rscm-gauge">
+            <div class="rscm-gauge-track"><div class="rscm-gauge-fill" id="rscmGaugeFill"></div>
+              <span class="rscm-box" data-field="RSCM Score">—</span>
+            </div>
+          </div>
+          <div class="rscm-meta">
+            <span class="rscm-caption">RSCM risk score</span>
+            <span class="rscm-label" id="rscmLabel">—</span>
+          </div>
+        </div>
+
+        <div class="action-row" style="margin-top:10px;">
+          <button class="action secondary" onclick="onAction('cpo')">CPO</button>
+          <button class="action secondary" onclick="onAction('ccm')">CCM</button>
+          <button class="action secondary" onclick="onAction('status-change-pcare')">Status Change</button>
+        </div>
+      </div>
+
+      <!-- Specialty Services -->
+      <div class="subpanel" id="specialtyServices">
+        <div class="subsection-title" style="display:flex;justify-content:space-between;align-items:center;">
+          Wound Care
+          <button class="action" onclick="openWoundVisitPopover()" style="padding:6px 10px;"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.5 12 3.5l8.5 8"/><path d="M5.5 10v8.5a1 1 0 0 0 1 1H9v-5h6v5h2.5a1 1 0 0 0 1-1V10"/></svg> New Visit</button>
+        </div>
+        <div class="row3">
+          <div class="field"><label>Status</label>
+            <select data-field="WoundCare_Status"><option>Active</option><option>Inactive</option></select>
+          </div>
+          <div class="field"><label>Place of Service</label>
+            <select data-field="Place_Service"><option>ALF</option><option>Office</option></select>
+          </div>
+          <div class="field"><label>Approved Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="WoundCare_ApprovedDate"></div></div>
+        </div>
+        <div class="field"><label>Provider</label><input type="text" data-field="Patients ~ WCare_Provider::Name" readonly></div>
+
+        <div class="subsection-title">Neuropsych</div>
+        <div class="row2">
+          <div class="field"><label>Status</label>
+            <select data-field="Neuropsych_Status"><option>Active</option><option>Inactive</option></select>
+          </div>
+          <div class="field"><label>Approved Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Neuropsych_ApprovedDate"></div></div>
+        </div>
+        <div class="field"><label>Provider</label><input type="text" data-field="Patients ~ Neuropsych_Provider::Name" readonly></div>
+
+        <div class="subsection-title" style="display:flex;justify-content:space-between;align-items:center;">
+          Specialty / Additional Providers
+          <button class="action" onclick="openSpecialtyVisitPopover()" style="padding:6px 10px;"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.5 12 3.5l8.5 8"/><path d="M5.5 10v8.5a1 1 0 0 0 1 1H9v-5h6v5h2.5a1 1 0 0 0 1-1V10"/></svg> New Visit</button>
+        </div>
+        <div class="row3">
+          <div class="field"><label>Status</label>
+            <select data-field="specialty_status"><option>Active</option><option>Inactive</option></select>
+          </div>
+          <div class="field"><label>Place of Service</label>
+            <select data-field="Place_Service"><option>ALF</option><option>Office</option></select>
+          </div>
+          <div class="field"><label>Approved Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="specialty_approved_date"></div></div>
+        </div>
+        <div class="locked-wrap" id="specialtyProvidersWrap">
+          <table class="portal" id="specialtyProvidersPortal">
+            <thead><tr><th>Provider</th><th>Specialty</th><th>Provider ID</th></tr></thead>
+            <tbody id="specialtyProvidersBody"><tr><td colspan="3" style="color:#999;">(portal Patients_Provider — sin registros en la muestra)</td></tr></tbody>
+          </table>
+          <div class="lock-overlay"><span class="lock-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="26" height="26"><rect x="4.5" y="10.5" width="15" height="10" rx="1.8"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg></span><span class="lock-caption">Available when Specialty status is Active</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ RIGHT: TH / Psych / PC / APL / RPR / Pend / Appt ============ -->
+    <div class="panel">
+      <div class="subtabs">
+        <button class="active" data-sub="right" data-target="tabTH">TH</button>
+        <button data-sub="right" data-target="tabPsych">Psych</button>
+        <button data-sub="right" data-target="tabPC">PC</button>
+        <button data-sub="right" data-target="tabAPL">APL</button>
+        <button data-sub="right" data-target="tabRPR">RPR</button>
+        <button data-sub="right" data-target="tabPend">Pend</button>
+        <button data-sub="right" data-target="tabAppt">Appt</button>
+      </div>
+
+      <!-- TH -->
+      <div class="subpanel active" id="tabTH">
+        <div class="field"><label>Provider</label><input type="text" data-field="Patients ~ Therapy_Provider::Name" readonly></div>
+        <div class="field"><label>Initial / Assessment Visit</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Initial_Visit"></div></div>
+        <div class="row3">
+          <div class="field"><label>Last Visit TH</label><div class="calcbox" data-field="Therapy_Last_Visit">—</div></div>
+          <div class="field"><label>Last Visit PSY</label><div class="calcbox" data-field="Psychiatry_Last_Visit">—</div></div>
+          <div class="field"><label>Last Visit PC</label><div class="calcbox" data-field="PrimaryCare_Last_Visit">—</div></div>
+        </div>
+        <div class="field"><label>Visit Frequency</label>
+          <select data-field="Therapy_Visit_Frequency"><option>Weekly</option><option>Bi-Weekly</option><option>Monthly</option></select>
+        </div>
+        <div class="field"><label>Last Tx Plan</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Last_Tx_Plan"></div></div>
+        <div class="field"><label>Last Progress Summary</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Last_Progress_Summary"></div></div>
+        <div class="row2">
+          <div class="field"><label>Remaining Tx Plan Visits</label><input type="number" data-field="Therapy_Remaining_Tx_Plan_Visits" readonly></div>
+          <div class="field"><label>Tx Exp. Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Tx_Expire_Date"></div></div>
+        </div>
+        <div class="field"><label>Provider Authorized</label><input type="text" data-field="Providers 8::Name"></div>
+
+        <div class="auth-grid">
+          <div class="col">
+            <div class="field"><label>Authorization Carrier</label><select data-field="Therapy_Authorization_Carrier"><option value=""></option></select></div>
+            <div class="field"><label>Visits Left in Current Auth</label><input type="text" data-field="Therapy_Visits_Left_InCurrent_Authorization" readonly></div>
+            <div class="field"><label>Authorization Start</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Authorization_Start"></div></div>
+            <div class="field"><label>Authorization Stop</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Authorization_Stop"></div></div>
+            <div class="field"><label>Codes Authorized</label><input type="text" data-field="Therapy_Codes_Authorizated"></div>
+            <div class="field note"><label>Authorization Notes</label><textarea data-field="Therapy_Authorization_Notes" rows="3"></textarea></div>
+          </div>
+          <div class="col">
+            <div class="field"><label>Authorization Carrier</label><select data-field="Therapy_Authorization_Second_Carrier"><option value=""></option></select></div>
+            <div class="field"><label>Visits Left in Current Auth</label><input type="text" data-field="Therapy_Visits_Left_InCurrent_Second_Authorization" readonly></div>
+            <div class="field"><label>Authorization Start</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Authorization_Second_Start"></div></div>
+            <div class="field"><label>Authorization Stop</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Therapy_Authorization_Second_Stop"></div></div>
+            <div class="field"><label>Codes Authorized</label><input type="text" data-field="Therapy_Authorization_Second_Codes"></div>
+            <div class="field note"><label>Authorization Notes</label><textarea data-field="Therapy_Authorization_Second_Notes" rows="3"></textarea></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Psych -->
+      <div class="subpanel" id="tabPsych">
+        <div class="field"><label>Provider</label><input type="text" data-field="Patients ~ Psychiatry_Provider::Name" readonly></div>
+        <div class="field"><label>Initial Visit</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Psychiatry_Initial_Visit"></div></div>
+        <div class="row3">
+          <div class="field"><label>Last Visit PSY</label><div class="calcbox" data-field="Psychiatry_Last_Visit">—</div></div>
+          <div class="field"><label>Last Visit TH</label><div class="calcbox" data-field="Therapy_Last_Visit">—</div></div>
+          <div class="field"><label>Last Visit PC</label><div class="calcbox" data-field="PrimaryCare_Last_Visit">—</div></div>
+        </div>
+        <div class="field"><label>Visit Frequency</label>
+          <select data-field="Psychiatry_Visit_Frequency"><option>Weekly</option><option>Bi-Weekly</option><option>Monthly</option></select>
+        </div>
+        <div class="field"><label>Next Visit Date Range</label><input type="text" data-field="Psychiatry_Next_Visit_Date_Range"></div>
+        <div class="field"><label>Provider Authorized</label><select data-field="Providers 9::Name"><option value=""></option></select></div>
+        <div class="field"><label>Authorization Carrier</label><select data-field="Psychiatry_Authorization_Carrier"><option value=""></option></select></div>
+        <div class="row2">
+          <div class="field"><label>Visits Left in Current Auth</label><div class="calcbox flag" data-field="Psychiatry_Authorization_Visits">?</div></div>
+          <div class="field"><label>Company Auth</label><div class="calcbox flag" data-field="PSYCH_Company_AuthVisits">—</div></div>
+        </div>
+        <div class="field"><label>Authorization Start</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Psychiatry_Authorization_Start"></div></div>
+        <div class="field"><label>Authorization Stop</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Psychiatry_Authorization_Stop"></div></div>
+        <div class="field"><label>Codes Authorized</label><input type="text" data-field="Psychiatry_Codes_Authorizated"></div>
+        <div class="field note"><label>Authorization Notes</label><textarea data-field="Psychiatry_Authorization_Notes" rows="4"></textarea></div>
+      </div>
+
+      <!-- PC -->
+      <div class="subpanel" id="tabPC">
+        <div class="field"><label>Provider:</label><input type="text" data-field="Patients ~ PCare_Provider::Name" readonly></div>
+        <div class="row2">
+          <div class="field"><label>Organizer:</label><input type="text" data-field="Facilities 2::Organizer" readonly></div>
+          <div class="field"><label>Chronic Care Manager:</label><select data-field="Facilities 2::Care Manager"><option value=""></option></select></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Initial Visit</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="PrimaryCare_Initial_Visit"></div></div>
+          <div class="field"><label>Annual Visit</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="PrimaryCare_Annual_Visit"></div></div>
+        </div>
+        <div class="row3">
+          <div class="field"><label>Last Visit PC</label><div class="calcbox" data-field="PrimaryCare_Last_Visit">—</div></div>
+          <div class="field"><label>Last Visit PSY</label><div class="calcbox" data-field="Psychiatry_Last_Visit">—</div></div>
+          <div class="field"><label>Last Visit TH</label><div class="calcbox" data-field="Therapy_Last_Visit">—</div></div>
+        </div>
+        <div class="row3">
+          <div class="field"><label>MDC Part B Effective Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Admin_MDC Start Date"></div></div>
+          <div class="field"><label>IPPE Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Date_IPPE"></div></div>
+          <div class="field"><label>AWV Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Date_AWV"></div></div>
+        </div>
+        <div class="field"><label>Visit Frequency</label><select data-field="PrimaryCare_Visit_Frequency"><option>Weekly</option><option>Monthly</option><option>Quarterly</option></select></div>
+        <div class="row2">
+          <div class="field"><label>Routine Next Visit Date</label><input type="text" data-field="PCare Next Visit Date"></div>
+          <div class="field"><label>Acute Next Visit Date</label><input type="text" data-field="PCare Next Visit Date Acute"></div>
+        </div>
+        <div class="row3">
+          <div class="field"><label>Last 30 Day</label><div class="calcbox" data-field="PC_Last 30">—</div></div>
+          <div class="field"><label>Last 60 Day</label><div class="calcbox" data-field="PC_Last 60">—</div></div>
+          <div class="field"><label>Last 90 Day</label><div class="calcbox" data-field="PC_Last 90">—</div></div>
+        </div>
+        <div class="field"><label>Advanced Care Planning</label><div class="calcbox" data-field="PrimaryCare_Last_ACP">—</div></div>
+        <div class="field"><label>Provider Authorized</label><input type="text" data-field="Providers 10::Name" readonly></div>
+        <div class="field"><label>Authorization Carrier</label><input type="text" data-field="PrimaryCare_Authorization_Carrier"></div>
+        <div class="row2">
+          <div class="field"><label>Authorization Start</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="PrimaryCare_Authorization_Start"></div></div>
+          <div class="field"><label>Authorization Stop</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="PrimaryCare_Authorization_Stop"></div></div>
+        </div>
+        <div class="field"><label>Codes Authorized</label><input type="text" data-field="PrimaryCare_Codes_Authorizated"></div>
+        <div class="field note"><label>Authorization Notes</label><textarea data-field="PrimaryCare_Authorization_Notes" rows="3"></textarea></div>
+
+        <div class="subsection-title">Care Gaps</div>
+        <div class="row3">
+          <div class="field"><label>BC</label><input type="text" data-field="CareGap_Breast"></div>
+          <div class="field"><label>DS</label><input type="text" data-field="CareGap_Depression"></div>
+          <div class="field"><label>HTN</label><input type="text" data-field="CareGap_HTN"></div>
+        </div>
+        <div class="field"><label>DM</label><input type="text" data-field="CareGap_DM"></div>
+      </div>
+
+      <!-- APL -->
+      <div class="subpanel" id="tabAPL">
+        <div class="field note"><label>Therapy APL Notes</label><textarea data-field="Therapy_APL_Notes" rows="4"></textarea></div>
+        <div class="field note"><label>Psychiatry APL Notes</label><textarea data-field="Psychiatry_APL_Notes" rows="4"></textarea></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <label style="font-size:11px;color:var(--label);font-weight:600;">Primary Care APL Notes</label>
+          <button class="action" style="padding:5px 8px;" onclick="onAction('add-lg-phone')">Add LG &amp; PT Phone Info</button>
+        </div>
+        <div class="field note"><textarea data-field="PCare_APL_Notes" rows="4"></textarea></div>
+        <div class="field note"><label>Specialty APL Notes</label><textarea data-field="Specialty_APL_Notes" rows="4"></textarea></div>
+      </div>
+
+      <!-- RPR -->
+      <div class="subpanel" id="tabRPR">
+        <div class="field note"><label>Psychiatry RPR Notes</label><textarea data-field="Psychiatry_RPR_Notes" rows="4"></textarea></div>
+        <div class="field note"><label>Therapy RPR Notes</label><textarea data-field="Therapy_RPR_Notes" rows="4"></textarea></div>
+        <div class="field note"><label>Primary Care RPR Notes</label><textarea data-field="PCare_RPR_Notes" rows="4"></textarea></div>
+      </div>
+
+      <!-- Pend -->
+      <div class="subpanel" id="tabPend">
+        <div class="row2">
+          <div class="field"><label>Referral Pending:</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="Referral_Pending"></div></div>
+          <div class="field"><label>Referral Source:</label><select data-field="Referral_Source"><option value=""></option></select></div>
+        </div>
+        <div class="subsection-title">Missing Items:</div>
+        <div class="checkbox-grid" id="missingItemsGrid">
+          <!-- generado por JS desde MISSING_ITEMS_VALUE_LIST -->
+        </div>
+        <div class="field note"><label>Notes</label><textarea data-field="Notes" rows="3"></textarea></div>
+        <div class="field"><label>Follow Up Date</label><div class="date-display" tabindex="0" role="button" data-kind="date" data-field="FollowUpIntake"></div></div>
+        <div class="field note"><textarea data-field="FollowUpIntakeNotes" rows="3"></textarea></div>
+      </div>
+
+      <!-- Appt -->
+      <div class="subpanel" id="tabAppt">
+        <div class="appt-toolbar">
+          <strong>Office Appointment Tracking</strong>
+          <button class="add" onclick="onAction('appt-add')">+</button>
+        </div>
+        <table class="portal">
+          <thead><tr><th>Date</th><th>Outcome</th><th>Provider</th><th>Comments</th></tr></thead>
+          <tbody id="apptPortalBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div><!-- /layout -->
+  </div><!-- /page-details -->
+
+  <!-- Placeholder para cualquier tab que no sea "Details" (aún no construido).
+       switchTab() le pone el nombre del tab clicado en #placeholderTabName. -->
+  <div class="tab-page" id="page-placeholder">
+    <div class="dev-placeholder">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5l3.2 1.9"/></svg>
+      <h2><span id="placeholderTabName">This section</span> — Under Development</h2>
+      <p>This tab hasn't been built yet. It will load its own content here, inside this same Web Viewer, once it's ready.</p>
+    </div>
+  </div>
+  </div><!-- /tabContentHost -->
+    </div><!-- /app-main -->
+  </div><!-- /screenDetail -->
+
+  <!-- Popover "Select Order" — replica del popover real del botón Orders (Main Services) -->
+  <div class="order-popover-backdrop" id="orderPopoverBackdrop" hidden onclick="if(event.target===this) closeOrdersPopover()">
+    <div class="order-popover">
+      <div class="order-popover-head">
+        <span>Select Order</span>
+        <button onclick="closeOrdersPopover()">✕</button>
+      </div>
+      <div class="order-popover-grid">
+        <button onclick="onAction('order-physician')"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M8.5 3.5h7a1 1 0 0 1 1 1V4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-.5a1 1 0 0 1 1-1Z"/><path d="M6.5 4.6H6A1.5 1.5 0 0 0 4.5 6.1v13A1.5 1.5 0 0 0 6 20.6h12a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 18 4.6h-.5"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="14.5" x2="16" y2="14.5"/><line x1="8" y1="18" x2="13" y2="18"/></svg></span> Physician Order</button>
+        <button onclick="onAction('order-lab')"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M9 2.5h6"/><path d="M10 3v6.2L4.8 18a2 2 0 0 0 1.7 3h11a2 2 0 0 0 1.7-3L14 9.2V3"/><line x1="8.3" y1="14.5" x2="15.7" y2="14.5"/></svg></span> Lab Requisition</button>
+        <button onclick="onAction('order-imaging')"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><rect x="3" y="3" width="18" height="18" rx="2.2"/><path d="M8.5 15.5c1.3-4 2.4-6.2 3.5-6.2s2.2 2.2 3.5 6.2"/><circle cx="12" cy="7.3" r="1.1" fill="currentColor" stroke="none"/></svg></span> Imaging Order</button>
+        <button onclick="onAction('order-referral')"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><circle cx="7" cy="12" r="3.2"/><circle cx="17" cy="6.5" r="2.6"/><circle cx="17" cy="17.5" r="2.6"/><path d="M9.6 10.6 14.6 7.8"/><path d="M9.6 13.4 14.6 16.2"/></svg></span> Referral Order</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Popover "Select Primary Care Visit Type" — botón New Visit (Main Services → Primary Care) -->
+  <div class="order-popover-backdrop" id="visitPopoverBackdrop" hidden onclick="if(event.target===this) closeVisitPopover()">
+    <div class="visit-popover">
+      <div class="visit-popover-head">
+        <span>Select Primary Care Visit Type</span>
+        <button onclick="closeVisitPopover()">✕</button>
+      </div>
+      <div class="visit-popover-grid">
+        <button onclick="onAction('visit-initial')"><span class="dot red"></span> Initial Visit</button>
+        <button onclick="onAction('visit-ccm')"><span class="dot red"></span> Chronic Care Mgmt</button>
+        <button onclick="onAction('visit-routine')"><span class="dot red"></span> Routine Visit</button>
+        <button onclick="onAction('visit-discharge')"><span class="dot green"></span> Discharge Summary</button>
+        <button onclick="onAction('visit-acute')"><span class="dot red"></span> Acute Visit</button>
+        <button onclick="onAction('visit-nonftf')"><span class="dot red"></span> Non-Face to Face</button>
+        <button onclick="onAction('visit-acp')"><span class="dot red"></span> Advanced Care Planning</button>
+        <button onclick="onAction('visit-statuschange')"><span class="dot green"></span> Status Change</button>
+        <button onclick="onAction('visit-awe')"><span class="dot red"></span> Annual Wellness Exam</button>
+        <button onclick="onAction('visit-addendum')"><span class="dot green"></span> Addendum</button>
+      </div>
+      <button class="visit-popover-close" onclick="closeVisitPopover()">✕ Close</button>
+    </div>
+  </div>
+
+  <!-- Popover "Select Wound Care Visit Type" — botón New Visit (Specialty Services → Wound Care) -->
+  <div class="order-popover-backdrop" id="woundVisitPopoverBackdrop" hidden onclick="if(event.target===this) closeWoundVisitPopover()">
+    <div class="visit-popover single-col">
+      <div class="visit-popover-head">
+        <span>Select Wound Care Visit Type</span>
+        <button onclick="closeWoundVisitPopover()">✕</button>
+      </div>
+      <div class="visit-popover-grid">
+        <button onclick="onAction('wc-visit-routine')"><span class="dot green"></span> Wound Care Visit</button>
+        <button onclick="onAction('wc-visit-addendum')"><span class="dot green"></span> Addendum</button>
+        <button onclick="onAction('wc-visit-chartmemo')"><span class="dot green"></span> Chart Memo</button>
+        <button onclick="onAction('wc-visit-statuschange')"><span class="dot green"></span> Status Change</button>
+      </div>
+      <button class="visit-popover-close" onclick="closeWoundVisitPopover()">✕ Close</button>
+    </div>
+  </div>
+
+  <!-- Popover "Select Specialty Visit Type" — botón New Visit (Specialty Services → Specialty/Additional Providers) -->
+  <div class="order-popover-backdrop" id="specialtyVisitPopoverBackdrop" hidden onclick="if(event.target===this) closeSpecialtyVisitPopover()">
+    <div class="visit-popover single-col">
+      <div class="visit-popover-head">
+        <span>Select Specialty Visit Type</span>
+        <button onclick="closeSpecialtyVisitPopover()">✕</button>
+      </div>
+      <div class="visit-popover-grid">
+        <button onclick="onAction('specialty-cardio-assessment')"><span class="dot green"></span> Cardiology Assessment</button>
+        <button onclick="onAction('specialty-cardio-followup')"><span class="dot green"></span> Cardiology Follow Up</button>
+        <button onclick="onAction('specialty-cardio-nonftf')"><span class="dot green"></span> Cardiology Non-Face to Face</button>
+        <button onclick="onAction('specialty-cardio-reading')"><span class="dot green"></span> Cardiology Reading</button>
+        <button onclick="onAction('specialty-ortho-assessment')"><span class="dot green"></span> Ortho Assessment</button>
+        <button onclick="onAction('specialty-ortho-procedure')"><span class="dot green"></span> Ortho Procedure</button>
+        <button onclick="onAction('specialty-ortho-statuschange')"><span class="dot green"></span> Ortho Status Change</button>
+      </div>
+      <button class="visit-popover-close" onclick="closeSpecialtyVisitPopover()">✕ Close</button>
+    </div>
+  </div>
+
+  <!-- ---------- barra flotante de guardado (ver notas de arquitectura en el <style>, sección "Guardado con botón") ---------- -->
+  <div class="save-bar" id="saveBar">
+    <span class="sb-dot"></span>
+    <span class="sb-text" id="saveBarText">You have unsaved changes</span>
+    <span class="sb-error-text" id="saveBarError"></span>
+    <div class="sb-btns">
+      <button type="button" class="sb-discard" id="sbDiscardBtn">Discard</button>
+      <button type="button" class="sb-save" id="sbSaveBtn"><span class="sb-spinner"></span><span id="sbSaveLabel">Save</span></button>
+    </div>
+  </div>
+
+  <!-- ---------- modal "¿Descartar cambios sin guardar?" — se usa al navegar (otro paciente / volver a la lista) con la barra de guardado visible ---------- -->
+  <div class="confirm-backdrop" id="confirmDiscardBackdrop" hidden>
+    <div class="confirm-box">
+      <h3>Unsaved changes</h3>
+      <p>You have changes that haven't been saved yet. If you leave now, they'll be lost.</p>
+      <div class="cb-btns">
+        <button type="button" class="cb-cancel" id="cbCancelBtn">Stay here</button>
+        <button type="button" class="cb-discard" id="cbDiscardBtn">Discard &amp; leave</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  // ==========================================================================
+  // Value list: "Missing Items" (Pend) — la única lista de valores que el
+  // diccionario trae completa (columna "Lista de valores").
+  // ==========================================================================
+  const MISSING_ITEMS_VALUE_LIST = [
+    "Consent", "Medical Records",
+    "Doctor's Order", "Other",
+    "Insurance Information",
+    "Facesheet",
+    "Insurance Discrepancy",
+    "Pending Provider",
+    "Authorization Needed",
+    "Provider Credentialing",
+    "Consent to Treat Needed",
+    "POA Paperwork Needed",
+  ];
+
+  // ==========================================================================
+  // currentRecordId — el recordId del registro actualmente cargado (lo manda
+  // fmReceiveRecord con el registro real). En el demo suelto (SAMPLE_PATIENT,
+  // sin FileMaker detrás) queda en "DEMO" solo para que commitFieldChange()
+  // tenga algo que mandar y se pueda ver el flujo funcionando en consola.
+  // ==========================================================================
+  let currentRecordId = "DEMO";
+
+  // ==========================================================================
+  // PANTALLA "Patients" (listado) — ver nota de arquitectura completa en el
+  // <style> (sección ".screen"). Resumen: el HTML pide el listado y el
+  // detalle por su cuenta; FileMaker ya no empuja nada por iniciativa propia.
+  // ==========================================================================
+  function showScreen(name) {
+    document.getElementById("screenList").classList.toggle("active", name === "list");
+    document.getElementById("screenDetail").classList.toggle("active", name === "detail");
+  }
+
+  const PATIENTS_PAGE_SIZE = 100; // "primeros 100 con paginación" pedido por Juan
+  let listState = { page: 1, search: "", status: "", facility: "" };
+
+  // ---- requestPatientList() — PUENTE REAL con FileMaker ----
+  // Dispara "WebViewer_ListPatients" con {page, limit, search, status, facility};
+  // ese script hace un Data API "read" con query/sort/offset/limit sobre el
+  // layout liviano API_Patients_List (NO el de Detail, que trae ~98 campos) y
+  // manda el resultado de vuelta vía fmReceivePatientList(). El filtro/búsqueda/
+  // paginación se resuelven del lado de FileMaker (la query del Data API), no
+  // acá, porque en vivo son 100k+ pacientes.
+  function requestPatientList() {
+    performFMScript("WebViewer_ListPatients", JSON.stringify({
+      page: listState.page, limit: PATIENTS_PAGE_SIZE,
+      search: listState.search, status: listState.status, facility: listState.facility,
+    }));
+  }
+
+  // ---- fmReceivePatientList — PUENTE REAL con FileMaker ----
+  // FileMaker llama esto (Perform JavaScript in Web Viewer) con el resultado
+  // de WebViewer_ListPatients: { records: [...Data API data...], totalCount,
+  // page, limit }. Cada record trae { recordId, fieldData }.
+  window.fmReceivePatientList = function (payload) {
+    const data = typeof payload === "string" ? JSON.parse(payload) : payload;
+    renderPatientList(data.records || [], data.totalCount || 0, data.page || 1, data.limit || PATIENTS_PAGE_SIZE);
+  };
+
+  function initials(fd) {
+    return ((fd.First_Name || "?")[0] + (fd.Last_Name || "?")[0]).toUpperCase();
+  }
+
+  function calcAgeFromMDY(mdy) {
+    const m = String(mdy || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!m) return "";
+    const [, mm, dd, yyyy] = m;
+    const bd = new Date(+yyyy, +mm - 1, +dd);
+    const today = new Date();
+    let age = today.getFullYear() - bd.getFullYear();
+    const hasHadBirthday = (today.getMonth() > bd.getMonth()) || (today.getMonth() === bd.getMonth() && today.getDate() >= bd.getDate());
+    if (!hasHadBirthday) age--;
+    return age;
+  }
+
+  // ---- opciones del filtro de facilidad: se arman solas con las facilidades
+  // que vayan apareciendo en las respuestas reales (no hay value list fija
+  // acá), conservando la selección actual del usuario ----
+  function mergeFacilityOptions(records) {
+    const sel = document.getElementById("facilityFilter");
+    const have = new Set([...sel.options].map(o => o.value));
+    const names = [...new Set(records.map(r => (r.fieldData || {})["Facilities 2::Name"]).filter(Boolean))];
+    names.filter(n => !have.has(n)).sort().forEach(n => {
+      const opt = document.createElement("option");
+      opt.value = n; opt.textContent = n;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderPatientList(records, totalCount, page, limit) {
+    mergeFacilityOptions(records);
+    const body = document.getElementById("patientsTableBody");
+    body.innerHTML = "";
+    if (!records.length) {
+      body.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--ink-faint);padding:28px;">No patients match this search/filter.</td></tr>`;
+    }
+    records.forEach(r => {
+      const fd = r.fieldData || {};
+      const age = calcAgeFromMDY(fd.Birthdate);
+      const status = fd.PCare_Status || "";
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><div class="pt-name-cell">
+          <div class="pt-avatar">${initials(fd)}</div>
+          <div><div class="name">${fd.First_Name || ""} ${fd.Last_Name || ""}</div>
+          <div class="sub">${fd["Facilities 2::Name"] || "—"}</div></div>
+        </div></td>
+        <td>${fd.Birthdate || "—"}${age !== "" ? ` <span style="color:var(--ink-faint)">(${age})</span>` : ""}</td>
+        <td>${fd["Facilities 2::Name"] || "—"}</td>
+        <td>${status ? `<span class="status-badge ${status}">${status}</span>` : "—"}</td>
+        <td>${fd["Patients ~ PCare_Provider::Name"] || "—"}</td>
+        <td style="text-align:right;"><button type="button" class="pt-view-btn" data-record-id="${r.recordId}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg> View</button></td>`;
+      body.appendChild(tr);
+    });
+    body.querySelectorAll(".pt-view-btn").forEach(btn => {
+      btn.addEventListener("click", () => selectPatient(btn.dataset.recordId));
+    });
+
+    const start = totalCount === 0 ? 0 : (page - 1) * limit + 1;
+    const end = Math.min(page * limit, totalCount);
+    document.getElementById("pgSummary").textContent = `Showing ${start}–${end} of ${totalCount}`;
+    document.getElementById("pgPrevBtn").disabled = page <= 1;
+    document.getElementById("pgNextBtn").disabled = end >= totalCount;
+  }
+
+  // ---- selectPatient() — pide el detalle de UN paciente y cambia de pantalla ----
+  // Dispara "WebViewer_LoadPatient" con {recordId}; ese script hace el Data API
+  // read sobre API_Patients_Detail y llama a fmReceiveRecord() tal cual ya
+  // funciona hoy. El recordId siempre viene de acá, del click en la fila.
+  // switchTab("details") resetea el tab interno de Detail a "Details" cada
+  // vez que se abre un paciente, sin importar en qué tab se quedó el anterior.
+  // guardedNavigate() interpone el modal "¿Descartar cambios?" si hay campos
+  // sin guardar antes de saltar a otro paciente.
+  function selectPatient(recordId) {
+    guardedNavigate(() => {
+      showScreen("detail");
+      switchTab("details");
+      performFMScript("WebViewer_LoadPatient", JSON.stringify({ recordId }));
+    });
+  }
+
+  // Mismo guardedNavigate() al volver a la lista — "← Patients" con cambios
+  // sin guardar también pregunta antes de perderlos.
+  document.getElementById("backToListBtn").addEventListener("click", () => {
+    guardedNavigate(() => showScreen("list"));
+  });
+
+  document.getElementById("patientSearchInput").addEventListener("input", e => {
+    listState.search = e.target.value;
+    listState.page = 1;
+    requestPatientList();
+  });
+  document.querySelectorAll("#statusPills .status-pill").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#statusPills .status-pill").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      listState.status = btn.dataset.status;
+      listState.page = 1;
+      requestPatientList();
+    });
+  });
+  document.getElementById("facilityFilter").addEventListener("change", e => {
+    listState.facility = e.target.value;
+    listState.page = 1;
+    requestPatientList();
+  });
+  document.getElementById("pgPrevBtn").addEventListener("click", () => { listState.page--; requestPatientList(); });
+  document.getElementById("pgNextBtn").addEventListener("click", () => { listState.page++; requestPatientList(); });
+
+  // ==========================================================================
+  // Datos de muestra — lo que se ve en PCare_Detail_1..8.png (paciente "Maria Test")
+  // Las llaves son EXACTAMENTE los data-field del diccionario (Tabla::Campo).
+  // ==========================================================================
+  const SAMPLE_PATIENT = {
+    "Last_Name": "Test", "First_Name": "Maria", "NickName": "Maricel", "Suffix": "Jr.",
+    "Birthdate": "1934-07-11", "Gender": "Female", "Gender2": "", "Pronouns": "",
+    "Room_Location": "140B", "Facilities 2::Name": "A Test Facility_1",
+    "Telehealth Patient Location of Services": "Office", "level_of_care": "Memory Care",
+    "Code Status": "", "Main_Contact": "Jomari | 09670390727",
+    "Allergy_Alert": "No", "Resp Party Relationship": "",
+
+    "Patients ~ PCare_Provider::Name": "Michael PC",
+    "PCare_Status": "Active", "Place_Service": "ALF", "Pcare_ApprovedDate": "2026-07-14",
+    "CCM_enrollment_status": "Ineligible", "CCM_enrollment_date": "2026-05-20",
+    "PCare_APL_Notes": "", "RSCM Score": "12",
+
+    "WoundCare_Status": "Active", "WoundCare_ApprovedDate": "2024-07-18",
+    "Patients ~ WCare_Provider::Name": "Michael PC",
+    "Neuropsych_Status": "Active", "Neuropsych_ApprovedDate": "",
+    "Patients ~ Neuropsych_Provider::Name": "Michael Test, PhD",
+    "specialty_status": "Active", "specialty_approved_date": "2025-07-14",
+
+    "Patients ~ Therapy_Provider::Name": "Michael Test, PhD",
+    "Therapy_Initial_Visit": "2025-12-16", "Therapy_Last_Visit": "12/16/2025",
+    "Psychiatry_Last_Visit": "10/9/2025", "PrimaryCare_Last_Visit": "10/18/2025",
+    "Therapy_Visit_Frequency": "Weekly", "Therapy_Last_Tx_Plan": "2025-10-08",
+    "Therapy_Last_Progress_Summary": "2022-07-02", "Therapy_Remaining_Tx_Plan_Visits": "23",
+    "Therapy_Tx_Expire_Date": "2026-10-08", "Providers 8::Name": "",
+    "Therapy_Authorization_Carrier": "", "Therapy_Visits_Left_InCurrent_Authorization": "",
+    "Therapy_Authorization_Start": "2025-07-01", "Therapy_Authorization_Stop": "2026-06-30",
+    "Therapy_Codes_Authorizated": "", "Therapy_Authorization_Notes": "GA Medicaid",
+    "Therapy_Authorization_Second_Carrier": "", "Therapy_Visits_Left_InCurrent_Second_Authorization": "",
+    "Therapy_Authorization_Second_Start": "", "Therapy_Authorization_Second_Stop": "",
+    "Therapy_Authorization_Second_Codes": "", "Therapy_Authorization_Second_Notes": "",
+
+    "Patients ~ Psychiatry_Provider::Name": "Psych NP Test Trainer",
+    "Psychiatry_Initial_Visit": "2024-08-05", "Psychiatry_Visit_Frequency": "",
+    "Psychiatry_Next_Visit_Date_Range": "", "Providers 9::Name": "",
+    "Psychiatry_Authorization_Carrier": "", "Psychiatry_Authorization_Visits": "?",
+    "PSYCH_Company_AuthVisits": "?", "Psychiatry_Authorization_Start": "", "Psychiatry_Authorization_Stop": "",
+    "Psychiatry_Codes_Authorizated": "", "Psychiatry_Authorization_Notes": "",
+
+    "Facilities 2::Organizer": "Jomari Usman", "Facilities 2::Care Manager": "Danielle Fisher, LPN",
+    "PrimaryCare_Initial_Visit": "2025-02-26", "PrimaryCare_Annual_Visit": "2022-02-22",
+    "Admin_MDC Start Date": "2025-01-05", "Date_IPPE": "2021-04-11", "Date_AWV": "2025-07-29",
+    "PrimaryCare_Visit_Frequency": "", "PCare Next Visit Date": "",
+    "PCare Next Visit Date Acute": "", "PC_Last 30": "2025-02-11", "PC_Last 60": "2025-04-18",
+    "PC_Last 90": "2025-05-07", "PrimaryCare_Last_ACP": "", "Providers 10::Name": "",
+    "PrimaryCare_Authorization_Carrier": "AETNA PPO", "PrimaryCare_Authorization_Start": "",
+    "PrimaryCare_Authorization_Stop": "", "PrimaryCare_Codes_Authorizated": "13644",
+    "PrimaryCare_Authorization_Notes": "",
+    "CareGap_Breast": "", "CareGap_Depression": "", "CareGap_HTN": "", "CareGap_DM": "",
+
+    "Therapy_APL_Notes": "", "Psychiatry_APL_Notes": "Pt at hospital should be returning 9/26",
+    "Specialty_APL_Notes": "",
+    "Psychiatry_RPR_Notes": "", "Therapy_RPR_Notes": "Waiting on provider credentialing",
+
+    "Referral_Pending": "2017-01-08", "Referral_Source": "", "Missing_Items": "Pending Provider",
+    "Notes": "", "FollowUpIntake": "", "FollowUpIntakeNotes": "",
+
+    "_meta": {
+      age: "92 Years Old - (Female)", sex: "Female", facilityAbbr: "ATF",
+      insurances: ["GA Medicaid", "AETNA PPO"],
+      isTelehealth: true,
+      appointments: [],
+    }
+  };
+
+  // ==========================================================================
+  // loadPatient(record) — rellena TODO el formulario a partir de un objeto
+  // { "Tabla::Campo": valor }. Esta es la función que se reemplaza/alimenta
+  // cuando se conecte el Data API real.
+  // ==========================================================================
+  function loadPatient(record) {
+    document.querySelectorAll("[data-field]").forEach(el => {
+      const key = el.getAttribute("data-field");
+      if (!(key in record)) return;
+      let val = record[key];
+      if (el.dataset.kind === "date") {
+        // date-display: es un <div>, no un <input> — a propósito, así el
+        // motor de autofill del navegador (el "13 10 2026" en gris que
+        // aparecía solo dentro de FileMaker) no tiene ningún <input> de
+        // fecha al que ofrecerle una sugerencia. Se normaliza a MM/DD/YYYY
+        // (formato real de la Data API; SAMPLE_PATIENT trae algunas en ISO,
+        // heredadas del <input type="date"> nativo que usábamos antes). El
+        // mini-calendario propio es el único que llena este campo
+        // (initDateFields()); cuando está vacío, queda realmente en blanco.
+        el.textContent = toMDY(val);
+      } else if (el.tagName === "SELECT") {
+        if (val && ![...el.options].some(o => o.value === val)) {
+          const opt = document.createElement("option");
+          opt.value = val; opt.textContent = val;
+          el.appendChild(opt);
+        }
+        el.value = val;
+      } else if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+        el.value = val;
+      } else if (el.classList.contains("badge")) {
+        // Bug corregido: antes esto reemplazaba la sigla (BCS/DP/HTN/DM) por el
+        // valor crudo del campo ("—" cuando está vacío). El badge debe SIEMPRE
+        // mostrar su sigla (data-label) y solo cambiar de color on/off según si
+        // hay un care gap real.
+        el.textContent = el.dataset.label || el.textContent;
+        el.classList.toggle("on", !!val);
+        el.classList.toggle("off", !val);
+      } else {
+        el.textContent = val || "—";
+      }
+    });
+
+    const meta = record._meta || {};
+    document.getElementById("patientHeader").textContent =
+      `${record.First_Name} ${record.Last_Name} / ${meta.age} / ${meta.facilityAbbr}`;
+    document.getElementById("facilityAbbr").textContent = meta.facilityAbbr || "";
+
+    computeBanners(record, meta);
+    computeRSCM(record["RSCM Score"]);
+    renderMissingItems(record.Missing_Items);
+    renderAppointments(meta.appointments || []);
+    renderSpecialtyProviders(meta.specialtyProviders || [], record.specialty_status);
+  }
+
+  // ---- banners condicionales (condiciones "Hide object when" confirmadas por Juan contra el layout real) ----
+  function computeBanners(record, meta) {
+    // CODE STATUS (amarillo) — se oculta si: IsEmpty ( Patients::Code Status )
+    document.getElementById("codeStatusRow").hidden = !record["Code Status"];
+
+    // Allergy Alert (rojo) — se oculta si: Patients::Allergy_Alert ≠ "Yes"
+    document.getElementById("allergyRow").hidden = record.Allergy_Alert !== "Yes";
+
+    // Legal Guardian (naranja) — se oculta si: Patients::Resp Party Relationship ≠ "Legal Guardian"
+    document.getElementById("guardianRow").hidden = record["Resp Party Relationship"] !== "Legal Guardian";
+
+    // UHC Community Plan (morado) — se oculta si NINGUNO de Insurance_Primary/Secondary/Tertiary
+    // contiene "UHC Community Plan"
+    const insurances = (meta.insurances || []).join(" | ");
+    const hasUHC = insurances.includes("UHC Community Plan");
+    document.getElementById("uhcWarning").hidden = !hasUHC;
+
+    // TELEHEALTH PATIENT (azul) — se oculta si: Patients::Telehealth Patient Location of Services = ""
+    document.getElementById("telehealthBanner").hidden = !meta.isTelehealth;
+  }
+
+  // ---- RSCM: High / Medium / Low según el score, igual que las 3 condiciones del diccionario ----
+  function computeRSCM(scoreStr) {
+    const score = Number(scoreStr);
+    const label = document.getElementById("rscmLabel");
+    const fill = document.getElementById("rscmGaugeFill");
+    if (Number.isNaN(score)) {
+      label.textContent = "—";
+      if (fill) fill.style.background = "none";
+      return;
+    }
+    let text, color;
+    if (score >= 11) { text = "High"; color = "var(--danger)"; }
+    else if (score >= 5) { text = "Medium"; color = "var(--amber)"; }
+    else { text = "Low"; color = "var(--accent-dark)"; }
+    label.textContent = text;
+    label.style.color = color;
+    if (fill) {
+      // RSCM observado 0-15 aprox.; el gauge es puramente visual (no una escala clínica oficial)
+      const pct = Math.max(0, Math.min(100, (score / 15) * 100));
+      fill.style.background = `conic-gradient(${color} ${pct}%, transparent ${pct}%)`;
+    }
+  }
+
+  // ---- Pend > Missing Items: checkbox set desde la value list documentada ----
+  function renderMissingItems(selectedCsv) {
+    const selected = new Set((selectedCsv || "").split(/\r?\n|,/).map(s => s.trim()).filter(Boolean));
+    const grid = document.getElementById("missingItemsGrid");
+    grid.innerHTML = "";
+    MISSING_ITEMS_VALUE_LIST.forEach(item => {
+      const id = "mi_" + item.replace(/\W+/g, "_");
+      const wrap = document.createElement("label");
+      wrap.innerHTML = `<input type="checkbox" id="${id}" value="${item}" ${selected.has(item) ? "checked" : ""}> ${item}`;
+      grid.appendChild(wrap);
+    });
+    // Missing_Items es un solo campo (lista separada por saltos de línea), así que
+    // cada checkbox no se guarda individualmente: al marcar/desmarcar cualquiera se
+    // reconstruye la lista completa y se marca "sucia" de una vez (queda en el
+    // lote del próximo Save, igual que cualquier otro campo).
+    grid.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        const picked = [...grid.querySelectorAll('input[type="checkbox"]:checked')].map(c => c.value);
+        markDirty("Missing_Items", picked.join("\n"), grid, "checkboxgrid");
+      });
+    });
+  }
+
+  // ---- Appt > portal de citas ----
+  function renderAppointments(rows) {
+    const body = document.getElementById("apptPortalBody");
+    body.innerHTML = "";
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="4" style="color:#999;padding:10px;">(portal Patients_Appointment — sin registros en la muestra)</td></tr>`;
+      return;
+    }
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${r.date||""}</td><td>${r.outcome||""}</td><td>${r.provider||""}</td><td>${r.comments||""}</td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  // ---- Specialty / Additional Providers: portal Patients_Provider + candado condicional.
+  // Candado replicado del layout real: el objeto de candado se oculta ("Hide object when")
+  // cuando Patients::specialty_status = "Active" → o sea, el portal queda visible/desbloqueado
+  // solo con status "Active"; con cualquier otro valor (incl. vacío) se muestra el candado.
+  function renderSpecialtyProviders(rows, specialtyStatus) {
+    const wrap = document.getElementById("specialtyProvidersWrap");
+    wrap.classList.toggle("unlocked", specialtyStatus === "Active");
+
+    const body = document.getElementById("specialtyProvidersBody");
+    body.innerHTML = "";
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="3" style="color:#999;">(portal Patients_Provider — sin registros en la muestra)</td></tr>`;
+      return;
+    }
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${r.name||""}</td><td>${r.specialty||""}</td><td>${r.providerId||""}</td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  // ==========================================================================
+  // performFMScript — dispara un script de FileMaker desde el Web Viewer vía
+  // el esquema de URL fmp://. "$" = el archivo actualmente abierto en este
+  // cliente (no hace falta saber si es local o "Abrir remoto" contra el
+  // servidor). "param", si se pasa, viaja como Script Parameter literal.
+  //
+  // IMPORTANTE: los parámetros calculados con funciones de sesión de FileMaker
+  // (Get(AccountName), Get(AccountPrivilegeSetName), $$UserID, etc.) NO se
+  // pueden calcular acá en JavaScript — esas funciones solo existen dentro de
+  // FileMaker. Para un botón cuyo script real necesita un parámetro así (ej.
+  // "Lab Requisition", confirmado por Juan: usa un Case() con Get(AccountName)
+  // y $$UserID), NO se intenta reproducir la fórmula en JS: se dispara un
+  // script "puente" del lado de FileMaker que recalcula ese mismo Case() con
+  // contexto real y hace el Perform Script al script final. Ver onAction()
+  // para el detalle de cada botón.
+  // ==========================================================================
+  // 2026-10-19: cambiado de window.location.href="fmp://..." a
+  // window.FileMaker.PerformScript(), el puente oficial que FileMaker inyecta
+  // en todo Web Viewer con "Allow interactive content" activado (idéntico en
+  // Pro, Go y WebDirect). El truco de fmp:// funcionaba en el Web Viewer
+  // nativo de Pro (lo intercepta internamente), pero en WebDirect ese Web
+  // Viewer renderiza como un iframe real dentro del navegador — el propio
+  // navegador atrapaba esa navegación e intentaba abrir la app de escritorio
+  // FileMaker Pro (diálogo "¿Abrir FileMaker Pro?"), en vez de ejecutar el
+  // script dentro de la sesión de WebDirect. FileMaker.PerformScript() es una
+  // llamada JS→nativo propiamente dicha (no una navegación de página), así
+  // que ya no hace falta la cola/espaciado de 350ms que existía para evitar
+  // que una navegación se pisara con otra — FileMaker encola internamente.
+  // Se deja un fallback a fmp:// solo por si PerformScript no estuviera
+  // inyectado (ej. abriendo el HTML suelto en un navegador para pruebas).
+  let fmCallQueue = [];
+  let fmQueueBusy = false;
+  const FM_CALL_GAP_MS = 350;
+
+  function enqueueFMUrl(url) {
+    fmCallQueue.push(url);
+    processFMQueue();
+  }
+  function processFMQueue() {
+    if (fmQueueBusy || fmCallQueue.length === 0) return;
+    fmQueueBusy = true;
+    const url = fmCallQueue.shift();
+    console.log("[performFMScript] → (fallback fmp://)", url);
+    window.location.href = url;
+    setTimeout(() => { fmQueueBusy = false; processFMQueue(); }, FM_CALL_GAP_MS);
+  }
+
+  function performFMScript(scriptName, param) {
+    if (window.FileMaker && typeof window.FileMaker.PerformScript === "function") {
+      console.log("[performFMScript] → FileMaker.PerformScript", scriptName, param);
+      window.FileMaker.PerformScript(scriptName, param);
+      return;
+    }
+    let url = "fmp://$/LN-DEV?script=" + encodeURIComponent(scriptName);
+    if (param !== undefined) url += "&param=" + encodeURIComponent(param);
+    enqueueFMUrl(url);
+  }
+
+  // ==========================================================================
+  // Guardado con botón (2026-10-19). Editar un campo ya NO dispara nada hacia
+  // FileMaker — solo lo marca "sucio" (markDirty) y muestra la barra flotante
+  // #saveBar. Todos los campos sucios se mandan JUNTOS en un solo
+  // "WebViewer_SetField" cuando el usuario aprieta Save (saveAllChanges()).
+  // "Discard" (o el modal de confirmación al navegar con cambios sin guardar)
+  // simplemente vuelve a pintar el formulario completo desde el último
+  // registro recibido de verdad (lastLoadedRecord), sin tocar FileMaker.
+  //
+  // lastLoadedRecord se setea en fmReceiveRecord(), justo antes de llamar a
+  // loadPatient() — es el "snapshot" al que Discard vuelve.
+  // ==========================================================================
+  let lastLoadedRecord = null;
+  const dirtyFields = new Map(); // rawField -> { el, value, kind: "normal"|"date"|"checkboxgrid" }
+
+  function flashSaved(el) {
+    if (!el) return;
+    el.classList.remove("just-saved");
+    void el.offsetWidth; // fuerza reflow para poder re-disparar la animación en ediciones rápidas seguidas
+    el.classList.add("just-saved");
+    setTimeout(() => el.classList.remove("just-saved"), 900);
+  }
+
+  // Set Field by Name necesita el nombre de campo YA calificado con su
+  // ocurrencia de tabla ("TO::Campo"), no alcanza con el nombre de layout
+  // context. La mayoría de los data-field de este HTML son campos directos
+  // de Patients (sin "::"), así que acá se completan con "Patients::" antes
+  // de mandarlos; los que ya vienen calificados (relacionados, ej. "Facilities
+  // 2::Care Manager", "Patients ~ PCare_Provider::Name", "Providers 8::Name")
+  // se mandan tal cual, porque su ocurrencia real NO es Patients.
+  function qualifyField(field) {
+    return field.includes("::") ? field : "Patients::" + field;
+  }
+
+  // ---- markDirty() — llamado por cada campo editado en vez de guardar directo ----
+  function markDirty(field, value, el, kind) {
+    if (!field) return;
+    dirtyFields.set(field, { el, value, kind: kind || "normal" });
+    if (el) { el.classList.remove("just-saved", "save-error"); el.classList.add("field-dirty"); }
+    updateSaveBar();
+  }
+
+  function updateSaveBar() {
+    const bar = document.getElementById("saveBar");
+    const n = dirtyFields.size;
+    if (n === 0) { bar.classList.remove("visible"); return; }
+    document.getElementById("saveBarText").textContent =
+      n === 1 ? "You have 1 unsaved change" : `You have ${n} unsaved changes`;
+    bar.classList.add("visible");
+  }
+
+  function clearDirtyVisuals() {
+    dirtyFields.forEach(({ el }) => el && el.classList.remove("field-dirty", "save-error"));
+  }
+
+  // ---- Discard: vuelve a pintar todo el formulario desde el último registro
+  // real recibido, descartando cualquier edición sin guardar ----
+  function discardChanges() {
+    clearDirtyVisuals();
+    dirtyFields.clear();
+    document.getElementById("saveBar").classList.remove("visible", "sb-error", "sb-saving");
+    if (lastLoadedRecord) loadPatient(lastLoadedRecord);
+  }
+
+  // ---- Save: manda TODOS los campos sucios juntos en un solo WebViewer_SetField ----
+  const PENDING_SAVE_TIMEOUT_MS = 6000;
+  let saveTokenSeq = 0;
+  let pendingBatchSave = null; // { token, entries, timeoutId }
+
+  function saveAllChanges() {
+    if (dirtyFields.size === 0 || pendingBatchSave) return;
+    const token = "sv" + (++saveTokenSeq) + "_" + Date.now();
+    const entries = [...dirtyFields.entries()]; // snapshot — si editan algo más mientras guarda, queda para el próximo Save
+    const fields = {};
+    entries.forEach(([field, { value }]) => { fields[qualifyField(field)] = value; });
+
+    const bar = document.getElementById("saveBar");
+    bar.classList.remove("sb-error");
+    bar.classList.add("sb-saving");
+    document.getElementById("sbSaveBtn").disabled = true;
+    document.getElementById("sbDiscardBtn").disabled = true;
+
+    const timeoutId = setTimeout(() => {
+      pendingBatchSave = null;
+      onSaveSettled(false, "No confirmation from FileMaker — check WebViewer_SetField calls fmConfirmSave with this token.", entries);
+    }, PENDING_SAVE_TIMEOUT_MS);
+    pendingBatchSave = { token, entries, timeoutId };
+
+    performFMScript("WebViewer_SetField", JSON.stringify({ recordId: currentRecordId, fields, token }));
+  }
+
+  function onSaveSettled(ok, errorMsg, entries) {
+    const bar = document.getElementById("saveBar");
+    bar.classList.remove("sb-saving");
+    document.getElementById("sbSaveBtn").disabled = false;
+    document.getElementById("sbDiscardBtn").disabled = false;
+
+    if (ok) {
+      entries.forEach(([field, { el }]) => {
+        if (el) { el.classList.remove("field-dirty"); flashSaved(el); }
+        dirtyFields.delete(field);
+      });
+      bar.classList.remove("sb-error");
+      setTimeout(updateSaveBar, 900); // deja ver el flash verde antes de esconder la barra
+    } else {
+      entries.forEach(([, { el }]) => { if (el) el.classList.add("save-error"); });
+      bar.classList.add("sb-error");
+      document.getElementById("saveBarError").textContent = errorMsg || "Couldn't save — please try again.";
+      bar.classList.add("visible"); // se queda abierta con el error para reintentar
+      console.error("[saveAllChanges]", errorMsg);
+    }
+  }
+
+  // Llamado por FileMaker (Perform JavaScript in Web Viewer) para confirmar
+  // u objetar el lote de guardado. Parámetro: { token, ok, error? }.
+  window.fmConfirmSave = function (raw) {
+    const obj = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!pendingBatchSave || pendingBatchSave.token !== obj.token) return; // token viejo/ajeno
+    clearTimeout(pendingBatchSave.timeoutId);
+    const entries = pendingBatchSave.entries;
+    pendingBatchSave = null;
+    onSaveSettled(!!obj.ok, obj.error, entries);
+  };
+
+  document.getElementById("sbSaveBtn").addEventListener("click", saveAllChanges);
+  document.getElementById("sbDiscardBtn").addEventListener("click", discardChanges);
+
+  // ---- modal "¿Descartar cambios?" — se interpone al navegar (otro paciente
+  // / volver a la lista) mientras hay cambios sin guardar ----
+  let pendingNav = null;
+  function guardedNavigate(action) {
+    if (dirtyFields.size === 0) { action(); return; }
+    pendingNav = action;
+    document.getElementById("confirmDiscardBackdrop").hidden = false;
+  }
+  document.getElementById("cbCancelBtn").addEventListener("click", () => {
+    pendingNav = null;
+    document.getElementById("confirmDiscardBackdrop").hidden = true;
+  });
+  document.getElementById("cbDiscardBtn").addEventListener("click", () => {
+    document.getElementById("confirmDiscardBackdrop").hidden = true;
+    discardChanges();
+    const action = pendingNav; pendingNav = null;
+    if (action) action();
+  });
+
+  function initAutoSave() {
+    document.querySelectorAll(".field input[data-field], .field textarea[data-field]").forEach(el => {
+      if (el.dataset.kind === "date") return; // las fechas se marcan sucias desde selectDate()/Clear, no acá
+      el.addEventListener("input", () => markDirty(el.dataset.field, el.value, el));
+    });
+    document.querySelectorAll(".field select[data-field]").forEach(el => {
+      el.addEventListener("change", () => markDirty(el.dataset.field, el.value, el));
+    });
+  }
+
+  function openOrdersPopover() { document.getElementById("orderPopoverBackdrop").hidden = false; }
+  function closeOrdersPopover() { document.getElementById("orderPopoverBackdrop").hidden = true; }
+
+  function openVisitPopover() { document.getElementById("visitPopoverBackdrop").hidden = false; }
+  function closeVisitPopover() { document.getElementById("visitPopoverBackdrop").hidden = true; }
+
+  function openWoundVisitPopover() { document.getElementById("woundVisitPopoverBackdrop").hidden = false; }
+  function closeWoundVisitPopover() { document.getElementById("woundVisitPopoverBackdrop").hidden = true; }
+
+  function openSpecialtyVisitPopover() { document.getElementById("specialtyVisitPopoverBackdrop").hidden = false; }
+  function closeSpecialtyVisitPopover() { document.getElementById("specialtyVisitPopoverBackdrop").hidden = true; }
+
+  // ---- acciones (botones) — acá se conectan los scripts de FileMaker ----
+  function onAction(name) {
+    switch (name) {
+      // --- Popover "Select Order" (Main Services → Orders), confirmado por Juan 2026-10-13 ---
+      case "order-physician":
+        performFMScript("Patient Physicians Order - Create Order");
+        closeOrdersPopover();
+        break;
+      case "order-lab":
+        // El script real necesita el Case() con Get(AccountName)/$$UserID (ver nota de
+        // performFMScript arriba) → dispara el script puente "WV - Orders - Lab Requisition"
+        // que Juan debe crear en FileMaker con ese mismo Perform Script + Case() adentro,
+        // apuntando a "Patient Lab Requision Order - Create Order Staff".
+        performFMScript("WV - Orders - Lab Requisition");
+        closeOrdersPopover();
+        break;
+      case "order-imaging":
+        performFMScript("Patient Imaging Order - Create Order by Provider");
+        closeOrdersPopover();
+        break;
+      case "order-referral":
+        performFMScript("Patient Referral Order - Create Order by Provider");
+        closeOrdersPopover();
+        break;
+
+      // --- Popover "Select Primary Care Visit Type" (Main Services → New Visit), confirmado por Juan 2026-10-13 ---
+      case "visit-initial":
+        performFMScript("PC - New Initial Visit");
+        closeVisitPopover();
+        break;
+      case "visit-routine":
+        performFMScript("PC - New Routine Visit");
+        closeVisitPopover();
+        break;
+      case "visit-acute":
+        performFMScript("PC - New Acute Visit");
+        closeVisitPopover();
+        break;
+      case "visit-acp":
+        performFMScript("PC - New Advanced Care Planning Visit");
+        closeVisitPopover();
+        break;
+      case "visit-awe":
+        performFMScript("PC - New Annual Wellness Exam");
+        closeVisitPopover();
+        break;
+      case "visit-ccm":
+        performFMScript("PC - New Primary Care – Chronic Care Management");
+        closeVisitPopover();
+        break;
+      case "visit-discharge":
+        performFMScript("PC - New Discharge Summary");
+        closeVisitPopover();
+        break;
+      case "visit-nonftf":
+        performFMScript("PC - New Non-Face to Face");
+        closeVisitPopover();
+        break;
+      case "visit-statuschange":
+        performFMScript("PC - New Status Change");
+        closeVisitPopover();
+        break;
+      case "visit-addendum":
+        performFMScript("PC - New Addendum");
+        closeVisitPopover();
+        break;
+
+      // --- Botón "Status Change" suelto (Main Services) — mismo script que el de arriba, confirmado ---
+      case "status-change-pcare":
+        performFMScript("PC - New Status Change");
+        break;
+
+      // --- Popover "Select Wound Care Visit Type" (Specialty Services → Wound Care → New Visit), confirmado 2026-10-13 ---
+      case "wc-visit-routine":
+        performFMScript("WC - New Routine Visit");
+        closeWoundVisitPopover();
+        break;
+      case "wc-visit-addendum":
+        performFMScript("WC - New Addendum");
+        closeWoundVisitPopover();
+        break;
+      case "wc-visit-chartmemo":
+        performFMScript("WC - New Chart Memo");
+        closeWoundVisitPopover();
+        break;
+      case "wc-visit-statuschange":
+        performFMScript("WC - New Status Change");
+        closeWoundVisitPopover();
+        break;
+
+      // --- Popover "Select Specialty Visit Type" (Specialty Services → Specialty/Additional Providers → New Visit), confirmado 2026-10-13 ---
+      case "specialty-cardio-assessment":
+        performFMScript("SPECIALTY - Cardiology Assessment");
+        closeSpecialtyVisitPopover();
+        break;
+      case "specialty-cardio-followup":
+        performFMScript("SPECIALTY - Cardiology Follow Up");
+        closeSpecialtyVisitPopover();
+        break;
+      case "specialty-cardio-nonftf":
+        performFMScript("SPECIALTY - Cardiology - Non-Face to Face");
+        closeSpecialtyVisitPopover();
+        break;
+      case "specialty-cardio-reading":
+        performFMScript("SPECIALTY - Cardiology - Reading");
+        closeSpecialtyVisitPopover();
+        break;
+      case "specialty-ortho-assessment":
+        performFMScript("SPECIALTY - Ortho Assessment");
+        closeSpecialtyVisitPopover();
+        break;
+      case "specialty-ortho-procedure":
+        performFMScript("SPECIALTY - Ortho Procedure");
+        closeSpecialtyVisitPopover();
+        break;
+      case "specialty-ortho-statuschange":
+        performFMScript("SPECIALTY - Ortho Status Change");
+        closeSpecialtyVisitPopover();
+        break;
+
+      default:
+        console.log("[onAction]", name, "→ pendiente de conectar al script de FileMaker correspondiente");
+    }
+  }
+
+  // ==========================================================================
+  // fmDateToISO — convierte fechas que entrega la Data API (MM/DD/YYYY) al
+  // formato que requieren los <input type="date"> (YYYY-MM-DD). Si el valor
+  // ya viene en otro formato (o vacío) lo deja tal cual.
+  // ==========================================================================
+  function fmDateToISO(v) {
+    if (!v) return "";
+    const m = String(v).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!m) return v;
+    const [, mm, dd, yyyy] = m;
+    return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+  }
+
+  // toMDY — inversa de fmDateToISO: normaliza una fecha ISO (YYYY-MM-DD) a
+  // MM/DD/YYYY. Si ya viene en MM/DD/YYYY (el formato real de la Data API) o
+  // está vacía, la deja tal cual.
+  function toMDY(v) {
+    if (!v) return "";
+    const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return v;
+    const [, yyyy, mm, dd] = m;
+    return `${mm}/${dd}/${yyyy}`;
+  }
+
+  // ==========================================================================
+  // fmReceiveRecord — PUENTE REAL con FileMaker.
+  // Un script de FileMaker (disparado en OnRecordLoad / OnLayoutEnter de la
+  // layout Patients, o al cambiar de registro) arma el JSON del registro
+  // actual con "Execute FileMaker Data API" sobre la layout "Patients" y lo
+  // inyecta acá, por ejemplo via:
+  //   Perform JavaScript in Web Viewer [ Object Name: "detailWebViewer" ;
+  //     Function Name: "fmReceiveRecord" ; Parameters: $jsonDelRegistroActual ]
+  //
+  // Acepta el objeto de registro tal cual lo devuelve la Data API para UN
+  // registro: { fieldData: {...}, portalData: {...}, recordId, modId } — o
+  // un string JSON con esa misma forma. Las claves de fieldData ya coinciden
+  // 1:1 con los data-field de este HTML (verificado contra el schema real de
+  // Patients el 2026-10-12), así que no hace falta traducir nombres de campo.
+  //
+  // Las 5 condiciones "Hide object when" del box ALERT INFO (Code Status, Allergy
+  // Alert, Legal Guardian, UHC Community Plan, Telehealth Patient) fueron
+  // confirmadas por Juan directamente contra el layout real el 2026-10-13 y están
+  // implementadas tal cual en computeBanners().
+  //
+  // Tampoco están confirmados los nombres exactos de campo dentro del portal
+  // de citas (Appt Portal) porque el paciente de muestra no tiene filas ahí;
+  // al primer paciente real con citas, confirmar y ajustar el mapeo de
+  // appointments.
+  // ==========================================================================
+  window.fmReceiveRecord = function (raw) {
+    const obj = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const fd = obj.fieldData || obj;
+    const pd = obj.portalData || {};
+    // recordId real de este registro — lo que saveAllChanges() manda de
+    // vuelta al guardar, para que "WebViewer_SetField" sepa sobre cuál
+    // registro hacer Set Field (ver más arriba).
+    if (obj.recordId !== undefined) currentRecordId = obj.recordId;
+
+    // cualquier edición sin guardar que hubiera quedado de antes ya no aplica
+    // (llegó un registro nuevo de verdad) — se limpia por seguridad.
+    clearDirtyVisuals();
+    dirtyFields.clear();
+    document.getElementById("saveBar").classList.remove("visible", "sb-error", "sb-saving");
+
+    const record = Object.assign({}, fd);
+
+    record._meta = {
+      age: fd.Current_Age || "",
+      sex: fd.Gender || "",
+      facilityAbbr: fd.Facility_Abb || fd["Facilities 2::Abbreviation"] || "",
+      insurances: [fd.Insurance_Primary, fd.Insurance_Secondary, fd.Insurance_Tertiary].filter(Boolean),
+      isTelehealth: !!fd["Telehealth Patient Location of Services"],
+      // Nombres de portal confirmados vía layout_metadata de API_Patients_Detail el
+      // 2026-10-13 (ProofKit): el Object Name real NO es "Appt Portal" sino
+      // "APIPortal_Appointments" — con el nombre viejo, este portal nunca se llenaba.
+      appointments: (pd["APIPortal_Appointments"] || []).map(r => ({
+        date: r["Patients_Appointment::Date_Appt"] ?? r["Date_Appt"] ?? "",
+        outcome: r["Patients_Appointment::Outcome"] ?? r["Outcome"] ?? "",
+        provider: r["Patients_Appointment::Provider_Name"] ?? r["Provider_Name"] ?? "",
+        comments: r["Patients_Appointment::Comments"] ?? r["Comments"] ?? "",
+      })),
+      // NOTA pendiente: nombres de CAMPO dentro del portal (Date_Appt/Outcome/etc.) aún sin
+      // confirmar (ningún paciente de prueba tiene filas ahí todavía) — ajustar cuando se
+      // confirme. El Object Name del portal en sí SÍ está confirmado: "APIPortal_Providers"
+      // (no "Patients_Provider" — ese era el bug por el que nunca se veían los providers).
+      specialtyProviders: (pd["APIPortal_Providers"] || []).map(r => ({
+        name: r["Patients_Provider::Provider_Name"] ?? r["Provider_Name"] ?? "",
+        specialty: r["Patients_Provider::Specialty"] ?? r["Specialty"] ?? "",
+        providerId: r["Patients_Provider::PROVID"] ?? r["PROVID"] ?? "",
+      })),
+    };
+
+    lastLoadedRecord = record; // snapshot al que Discard vuelve
+    loadPatient(record);
+  };
+
+  // ==========================================================================
+  // Tabs de nivel superior (Details|Visits|Others|...|Admin) — menú lateral
+  // izquierdo DENTRO del HTML (acordado en el meeting del 14-oct, reemplaza
+  // el Tab Control nativo de FileMaker que se había planeado el 2026-10-13,
+  // porque ese control nativo hacía "saltar"/parpadear la ventana al cambiar
+  // de tab). Por ahora solo "details" tiene contenido real (#page-details,
+  // todo lo de Etapa 2); cualquier otro tab muestra el placeholder
+  // #page-placeholder con un mensaje "Under Development" en inglés.
+  //
+  // PUNTO DE ENGANCHE para cuando se construya el HTML de un tab nuevo:
+  // dentro del `else` de abajo, en vez de solo mostrar el placeholder,
+  // ahí es donde se dispararía la carga real de ese tab (p.ej. inyectar su
+  // HTML propio — ya con su data — en un contenedor dedicado, manteniendo
+  // el mismo Web Viewer sin cambiar de objeto/layout nativo).
+  // ==========================================================================
+  const TOP_TAB_LABELS = {
+    details: "Details", visits: "Visits", others: "Others", tele: "Tele",
+    problemlist: "Problem List", meds: "Meds", allergies: "Allergies",
+    labs: "Labs", imaging: "Imaging", referrals: "Referrals",
+    careteam: "Care Team", preventive: "Preventive", vitals: "Vitals",
+    hosp: "Hosp.", notes: "Notes", triage: "Triage", consent: "Consent",
+    email: "Email", admin: "Admin",
+  };
+
+  function switchTab(tabKey) {
+    document.querySelectorAll("#sideTabs .side-tab").forEach(b => {
+      b.classList.toggle("active", b.dataset.tab === tabKey);
+    });
+    const detailsPage = document.getElementById("page-details");
+    const placeholderPage = document.getElementById("page-placeholder");
+    if (tabKey === "details") {
+      detailsPage.classList.add("active");
+      placeholderPage.classList.remove("active");
+    } else {
+      detailsPage.classList.remove("active");
+      placeholderPage.classList.add("active");
+      document.getElementById("placeholderTabName").textContent =
+        TOP_TAB_LABELS[tabKey] || tabKey;
+      // TODO: acá se engancha la carga real del tab cuando exista su HTML.
+    }
+  }
+
+  // ojo: el selector exige [data-tab] para NO capturar el botón "← Patients"
+  // (#backToListBtn), que también tiene la clase .side-tab pero no es un tab
+  // de módulo — si se le pega este listener, switchTab(undefined) deja el
+  // placeholder "Under Development" activado por dentro de Detail, y la
+  // próxima vez que se abre un paciente aparece ese placeholder en vez de
+  // "Details" (bug real que se dio en producción, 2026-10-19).
+  document.querySelectorAll("#sideTabs .side-tab[data-tab]").forEach(btn => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+
+  // ---- tabs (Main/Specialty Services y TH/Psych/PC/APL/RPR/Pend/Appt) ----
+  document.querySelectorAll(".subtabs").forEach(strip => {
+    strip.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        strip.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        const group = btn.dataset.sub;
+        const panels = group === "mid"
+          ? ["mainServices", "specialtyServices"]
+          : ["tabTH","tabPsych","tabPC","tabAPL","tabRPR","tabPend","tabAppt"];
+        panels.forEach(id => document.getElementById(id).classList.remove("active"));
+        document.getElementById(btn.dataset.target).classList.add("active");
+      });
+    });
+  });
+
+  // ==========================================================================
+  // Mini-calendario propio para los campos data-kind="date". Reemplaza al
+  // <input type="date"> nativo (que se ve distinto en cada sistema operativo)
+  // por un campo de texto de solo lectura + ícono de calendario, y un único
+  // popover de calendario compartido que se reposiciona junto al campo que
+  // esté activo. El valor se guarda/muestra en MM/DD/YYYY (mismo formato que
+  // entrega la Data API), así no hace falta traducir nada en fmReceiveRecord.
+  // ==========================================================================
+  const ICON_CALENDAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><line x1="3.5" y1="9.5" x2="20.5" y2="9.5"/><line x1="8" y1="3" x2="8" y2="6.5"/><line x1="16" y1="3" x2="16" y2="6.5"/></svg>';
+  const ICON_CHEVRON_L = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 9 12 15 19"/></svg>';
+  const ICON_CHEVRON_R = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 15 12 9 19"/></svg>';
+  const MC_DOW = ["Su","Mo","Tu","We","Th","Fr","Sa"];
+
+  let mcTarget = null;   // <input> actualmente editado
+  let mcViewYear, mcViewMonth; // mes que el calendario está mostrando (0-11)
+
+  function parseMDY(str) {
+    const m = String(str || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!m) return null;
+    return { y: +m[3], m: +m[1] - 1, d: +m[2] };
+  }
+  function formatMDY(y, m, d) {
+    return `${String(m + 1).padStart(2, "0")}/${String(d).padStart(2, "0")}/${y}`;
+  }
+
+  function buildMiniCal() {
+    if (document.getElementById("miniCal")) return;
+    const cal = document.createElement("div");
+    cal.id = "miniCal";
+    cal.hidden = true;
+    cal.innerHTML = `
+      <div class="mc-head">
+        <button type="button" class="mc-prev" aria-label="Mes anterior">${ICON_CHEVRON_L}</button>
+        <span class="mc-title"></span>
+        <button type="button" class="mc-next" aria-label="Mes siguiente">${ICON_CHEVRON_R}</button>
+      </div>
+      <div class="mc-grid mc-dow-row">${MC_DOW.map(d => `<div class="mc-dow">${d}</div>`).join("")}</div>
+      <div class="mc-grid mc-days"></div>
+      <div class="mc-foot">
+        <button type="button" class="mc-today-btn">Today</button>
+        <button type="button" class="mc-clear-btn">Clear</button>
+      </div>`;
+    document.body.appendChild(cal);
+    cal.querySelector(".mc-prev").addEventListener("click", () => { stepMonth(-1); });
+    cal.querySelector(".mc-next").addEventListener("click", () => { stepMonth(1); });
+    cal.querySelector(".mc-today-btn").addEventListener("click", () => {
+      const t = new Date();
+      selectDate(t.getFullYear(), t.getMonth(), t.getDate());
+    });
+    cal.querySelector(".mc-clear-btn").addEventListener("click", () => {
+      if (mcTarget) {
+        mcTarget.textContent = "";
+        markDirty(mcTarget.dataset.field, "", mcTarget, "date");
+      }
+      closeMiniCal();
+    });
+    // evita que un click dentro del calendario lo cierre (ver listener global más abajo)
+    cal.addEventListener("mousedown", e => e.stopPropagation());
+  }
+
+  function stepMonth(delta) {
+    mcViewMonth += delta;
+    if (mcViewMonth < 0) { mcViewMonth = 11; mcViewYear--; }
+    if (mcViewMonth > 11) { mcViewMonth = 0; mcViewYear++; }
+    renderMiniCal();
+  }
+
+  function renderMiniCal() {
+    const cal = document.getElementById("miniCal");
+    const sel = parseMDY(mcTarget ? mcTarget.textContent : "");
+    const today = new Date();
+    const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    cal.querySelector(".mc-title").textContent = `${monthNames[mcViewMonth]} ${mcViewYear}`;
+
+    const first = new Date(mcViewYear, mcViewMonth, 1);
+    const startOffset = first.getDay(); // 0=Sun
+    const daysInMonth = new Date(mcViewYear, mcViewMonth + 1, 0).getDate();
+    const daysInPrevMonth = new Date(mcViewYear, mcViewMonth, 0).getDate();
+
+    const cells = [];
+    for (let i = startOffset - 1; i >= 0; i--) {
+      cells.push({ d: daysInPrevMonth - i, other: true, y: mcViewMonth === 0 ? mcViewYear - 1 : mcViewYear, m: mcViewMonth === 0 ? 11 : mcViewMonth - 1 });
+    }
+    for (let d = 1; d <= daysInMonth; d++) cells.push({ d, other: false, y: mcViewYear, m: mcViewMonth });
+    let next = 1;
+    while (cells.length % 7 !== 0 || cells.length < 42) {
+      cells.push({ d: next++, other: true, y: mcViewMonth === 11 ? mcViewYear + 1 : mcViewYear, m: mcViewMonth === 11 ? 0 : mcViewMonth + 1 });
+      if (cells.length >= 42) break;
+    }
+
+    const grid = cal.querySelector(".mc-days");
+    grid.innerHTML = "";
+    cells.forEach(c => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mc-day" + (c.other ? " mc-other" : "");
+      if (c.y === today.getFullYear() && c.m === today.getMonth() && c.d === today.getDate()) btn.classList.add("mc-today");
+      if (sel && c.y === sel.y && c.m === sel.m && c.d === sel.d) btn.classList.add("mc-selected");
+      btn.textContent = c.d;
+      btn.addEventListener("click", () => selectDate(c.y, c.m, c.d));
+      grid.appendChild(btn);
+    });
+  }
+
+  function selectDate(y, m, d) {
+    if (mcTarget) {
+      mcTarget.textContent = formatMDY(y, m, d);
+      markDirty(mcTarget.dataset.field, mcTarget.textContent, mcTarget, "date");
+    }
+    closeMiniCal();
+  }
+
+  function openMiniCal(input) {
+    buildMiniCal();
+    mcTarget = input;
+    const sel = parseMDY(input.textContent);
+    const base = sel ? new Date(sel.y, sel.m, 1) : new Date();
+    mcViewYear = base.getFullYear();
+    mcViewMonth = base.getMonth();
+    renderMiniCal();
+    const cal = document.getElementById("miniCal");
+    cal.hidden = false;
+    const r = input.getBoundingClientRect();
+    const calH = 300; // alto aproximado del popover, para decidir si voltearlo hacia arriba
+    const fitsBelow = r.bottom + calH <= window.innerHeight;
+    const top = fitsBelow
+      ? r.bottom + window.scrollY + 4
+      : r.top + window.scrollY - calH - 4;
+    let left = r.left + window.scrollX;
+    const maxLeft = window.scrollX + document.documentElement.clientWidth - 232 - 8;
+    if (left > maxLeft) left = maxLeft;
+    if (left < window.scrollX + 8) left = window.scrollX + 8;
+    cal.style.top = Math.max(window.scrollY + 4, top) + "px";
+    cal.style.left = left + "px";
+  }
+
+  function closeMiniCal() {
+    const cal = document.getElementById("miniCal");
+    if (cal) cal.hidden = true;
+    mcTarget = null;
+  }
+
+  function initDateFields() {
+    document.querySelectorAll('[data-kind="date"]').forEach(input => {
+      if (input.closest(".date-wrap")) return; // ya envuelto
+      const wrap = document.createElement("div");
+      wrap.className = "date-wrap";
+      input.parentNode.insertBefore(wrap, input);
+      wrap.appendChild(input);
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = "date-trigger";
+      trigger.setAttribute("aria-label", "Choose date");
+      trigger.innerHTML = ICON_CALENDAR;
+      wrap.appendChild(trigger);
+      const open = e => { e.stopPropagation(); openMiniCal(input); };
+      input.addEventListener("click", open);
+      input.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openMiniCal(input); }
+      });
+      trigger.addEventListener("click", open);
+    });
+  }
+
+  // cerrar el mini-calendario al hacer click afuera, o con Escape
+  document.addEventListener("mousedown", () => closeMiniCal());
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeMiniCal(); });
+
+  initDateFields();
+  initAutoSave();
+
+  // ---- init ----
+  loadPatient(SAMPLE_PATIENT);
+  requestPatientList();
+
+  // bloque temporal de diagnóstico (2026-10-19) — ver nota junto a #fmBridgeDebug
+  (function () {
+    const el = document.getElementById("fmBridgeDebug");
+    if (!el) return;
+    const hasFM = !!window.FileMaker;
+    const hasPerform = hasFM && typeof window.FileMaker.PerformScript === "function";
+    el.textContent = hasPerform
+      ? "✅ FileMaker.PerformScript OK"
+      : hasFM
+        ? "⚠️ window.FileMaker existe, sin PerformScript"
+        : "❌ window.FileMaker no existe";
+    el.style.background = hasPerform ? "#205c47" : "#b3382c";
+  })();
+</script>
+</body>
+</html>
